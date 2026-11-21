@@ -13,3 +13,6 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# Streamlit local secrets. The demo uses none.
+.streamlit/secrets.toml
