@@ -1,10 +1,12 @@
-# Market Dashboard
+# Market briefing
 
-Offline briefing for a single stock. It answers one question from a price history you already have: **is the latest volatility quiet or elevated for this stock, and is the trailing trend up or down?**
+A single-stock briefing you can show to a client. Pick a symbol, choose a window, and read the return, the risk, and the comparison with a benchmark. Every sentence on the page is filled from those calculations.
 
-The default run uses Apple daily prices bundled in this repo (17 Feb 2015 – 16 Feb 2017). No API key, no brokerage login, and no network call.
+Live prices come from Yahoo Finance through [yfinance](https://github.com/ranaroussi/yfinance). No API key. The bundled Apple file remains available as an explicit offline demo, with a saved SPY history for the same years.
 
-![AAPL risk-regime dashboard](dashboard.png)
+![AAPL versus SPY, one-year briefing](docs/screenshots/aapl_1y_overview.png)
+
+The numbers in the screenshots and the worked example below were produced on 22 Nov 2026, when the latest Yahoo bar was 20 Nov 2026. A later run prints new prices. The definitions do not change.
 
 ## Setup
 
@@ -16,75 +18,88 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The pinned stack is `numpy==2.5.5`, `pandas==3.1.1`, `matplotlib==3.11.2`, and `streamlit==1.67.0`. Streamlit is only required for the browser demo. The command-line briefing imports numpy, pandas, and matplotlib.
+Pinned packages: `numpy==2.5.5`, `pandas==3.1.1`, `streamlit==1.67.0`, `yfinance==0.2.66`, `plotly==6.3.1`.
 
 ## Worked example
 
-The workflow is a pre-meeting risk briefing for one ticker.
-
-1. Load an OHLCV file. The default is `aapl_raw.csv`.
-2. Build causal features: daily log return, rolling annualized volatility, trailing momentum.
-3. Read the **latest** warmed-up day as the regime, and keep the whole path on the chart so an earlier shock is still visible.
-4. Write a one-paragraph briefing and a four-panel figure.
-
-### Command line
-
-```bash
-python dashboard.py
-```
-
-```text
-AAPL as of 2017-02-16: close 135.35 (session log return -0.12%). 21-day annualized volatility is 21.2%, typical for this file (44th percentile, median 22.4%). 63-day momentum is an uptrend: +26.4% over the window. Peak 21-day vol in this file was 48.6% on 2015-09-08.
-File covers 2015-02-17 to 2017-02-16. 443 days have both features fully warmed up.
-Saved dashboard to dashboard.png
-```
-
-How to read that: at the end of the sample, AAPL is back near its highs and the last quarter is an uptrend, while 21-day volatility is ordinary for this file (middle of its own history). The chart still shows the stress episode. The 48.6% peak prints on 8 Sep 2015, not on the 24 Aug China-shock day, because a 21-day window reaches its high once those crash days have filled the window.
-
-The same briefing with slower windows (one quarter of volatility, about six months of momentum) flips the vol label from typical to quiet:
-
-```bash
-python dashboard.py --vol-window 63 --mom-window 126 --output dashboard_slow.png
-```
-
-```text
-AAPL as of 2017-02-16: close 135.35 (session log return -0.12%). 63-day annualized volatility is 15.6%, quiet for this file (4th percentile, median 24.2%). 126-day momentum is an uptrend: +23.9% over the window. Peak 63-day vol in this file was 34.9% on 2015-10-29.
-File covers 2015-02-17 to 2017-02-16. 380 days have both features fully warmed up.
-Saved dashboard to dashboard_slow.png
-```
-
-The sample file is found next to the code, so this works from any working directory:
-
-```bash
-python /path/to/market-dashboard/dashboard.py --output ./briefing.png
-```
-
-Optional flags:
-
-| Flag | Default | Role |
-|---|---|---|
-| `--csv` | bundled `aapl_raw.csv` | Another OHLCV file. See the column layout below. |
-| `--ticker` | inferred from names like `AAPL.Close` | Label in the title and the sentence. |
-| `--vol-window` | 21 | Trading days in the volatility window. |
-| `--mom-window` | 63 | Trading days in the momentum window. |
-| `--output` | `dashboard.png` | Where the figure is written. |
-
-### Browser
-
-From the repository root:
+### Live, in the browser
 
 ```bash
 streamlit run app.py
 ```
 
-Leave the file picker empty. The page briefs the bundled sample. Move the two window sliders to change the regime read; stretching volatility from 21 to 63 days is the comparison above. **Download PNG** saves the figure.
+Leave **Live market data** selected. The page loads AAPL against SPY for the last year.
 
-To brief a different history, upload a CSV. That file is read locally. The app does not call a data vendor. Accepted headers:
+On 22 Nov 2026 that window was 252 trading days, 20 Nov 2025 through 20 Nov 2026:
 
-- `Date, Open, High, Low, Close, Volume` (any capitalization), or
-- ticker-prefixed names, as in the sample: `Date, AAPL.Open, AAPL.High, AAPL.Low, AAPL.Close, AAPL.Volume`
+- Cumulative return **+29.1%** (adjusted close 265.33 to 342.56)
+- Annualized volatility **25.0%**, labeled **typical** because that figure sits at percentile rank 24.3 of AAPL's own rolling 21-day volatilities (quiet is 20 or below, elevated is 80 or above)
+- Maximum drawdown **−13.8%**, from 285.20 on 2 Dec 2025 to 245.84 on 20 Jan 2026
+- Versus SPY **+22.3 percentage points** (SPY returned +6.9% on the same 252 sessions)
 
-Extra columns (adjusted close, vendor moving averages) are ignored. Pass `--ticker DEMO` or type a label in the sidebar when the file has generic column names; otherwise the prefix is the ticker, and generic files are labeled `UNKNOWN`.
+The status line names the source (Yahoo Finance, auto-adjusted OHLC), the latest bar in the download, and the time that download was fetched. A cached file is reused for 12 hours. **Refresh prices** downloads again.
+
+Change the window to 6M and the same symbol prints a different result: **+13.5%** over 129 sessions, volatility 27.4%, drawdown −12.7%. Switching the symbol to MSFT, still on 6M, prints **+15.8%**, volatility 37.0% (percentile rank 76.2, still typical), drawdown −23.4% from 1 Jun 2026 to 25 Jun 2026, and SPY at −6.5% over those shared sessions.
+
+![AAPL and SPY rebased to 100](docs/screenshots/aapl_vs_spy_chart.png)
+
+![MSFT, six months](docs/screenshots/msft_6m.png)
+
+An unknown symbol stops with a message and does not invent a chart:
+
+![Unknown symbol](docs/screenshots/invalid_ticker.png)
+
+**Download analysis summary** saves the same sentences and the definitions as Markdown.
+
+The command-line form of the one-year AAPL briefing:
+
+```bash
+python dashboard.py --ticker AAPL --benchmark SPY --preset 1Y
+```
+
+```text
+AAPL adjusted close moved from 265.33 on 2025-11-20 to 342.56 on 2026-11-20: a cumulative return of +29.1% across 252 trading days.
+Annualized volatility is 25.0%, from 251 daily log returns. The label is typical: this 25.0% sits at percentile rank 24.3 of the 11558 rolling 21-day volatilities in the loaded history. Quiet is 20% or below, elevated is 80% or above, and the rank between them is typical.
+Maximum drawdown is -13.8%, from a peak of 285.20 on 2025-12-02 to a trough of 245.84 on 2026-01-20.
+On 2026-11-20 the close is above the 50-day average of 341.59. The close is above the 200-day average of 302.79.
+On the 252 shared sessions, AAPL returned +29.1% and SPY returned +6.9%. AAPL is 22.3 percentage points higher. Every session in the stock window has a benchmark print.
+Saved summary to analysis.md
+```
+
+Other presets: `1M`, `3M`, `6M`, `YTD`, `1Y`, `3Y`, `5Y`, `Max`. Or pass both `--start` and `--end` as `YYYY-MM-DD`.
+
+### Offline demo
+
+In the sidebar choose **Offline demo**. Nothing is downloaded. The stock is `aapl_raw.csv` (plotly/datasets, using the `AAPL.Adjusted` column). The benchmark is `spy_sample.csv`, a Yahoo Finance auto-adjusted SPY history for Feb 2015–Feb 2017 saved in this repo on 22 Nov 2026.
+
+```bash
+python dashboard.py --offline --preset Max
+```
+
+```text
+AAPL adjusted close moved from 122.91 on 2015-02-17 to 135.35 on 2017-02-16: a cumulative return of +10.1% across 506 trading days.
+Annualized volatility is 24.3%, from 505 daily log returns. The label is typical: this 24.3% sits at percentile rank 60.8 of the 485 rolling 21-day volatilities in the loaded history.
+Maximum drawdown is -30.4%, from a peak of 127.97 on 2015-05-22 to a trough of 89.01 on 2016-05-12.
+On 2017-02-16 the close is above the 50-day average of 120.50. The close is above the 200-day average of 108.17.
+On the 506 shared sessions, AAPL returned +10.1% and SPY returned +16.5%. AAPL is 6.3 percentage points lower. Every session in the stock window has a benchmark print.
+```
+
+![Offline Apple demo](docs/screenshots/offline_demo.png)
+
+The offline demo only contains AAPL and SPY. Other symbols ask you to switch back to live data. A one-day window reports that a return needs two adjusted closes.
+
+## How the figures are defined
+
+- **Cumulative return** is the adjusted close on the last session of the window divided by the adjusted close on the first session, minus one.
+- **Annualized volatility** is the sample standard deviation (divisor N−1) of daily log returns inside the window, multiplied by the square root of 252. Log return is the natural log of today's adjusted close over yesterday's. At least two daily returns are required.
+- **Maximum drawdown** is the deepest decline from a prior peak to a later close inside the window. The peak is the highest adjusted close on or before the trough. A window that never closes below a prior peak has a drawdown of zero.
+- **Moving averages** are simple averages of adjusted close, 50 days and 200 days. They are computed on the full loaded history and then drawn on the selected dates, so a 200-day average can appear inside a shorter window when earlier bars were loaded.
+- **Volatility label.** The window's annualized volatility is ranked against this symbol's rolling 21-day annualized volatilities on the **full loaded history**, not only inside the window. Quiet means a percentile rank of 20% or below. Elevated means 80% or above. A rank between those cuts is typical. The rank is the share of baseline windows strictly below the period volatility, plus half the share that tie. The label is withheld when fewer than 30 baseline windows exist. The page prints the rank next to the word, so the cut is visible.
+- **Benchmark gap.** Dates are an inner join: a session missing on either side is left out, not filled. Both series are adjusted closes. Each cumulative return runs from the first shared session to the last. The gap is the stock's cumulative return minus the benchmark's, in percentage points. It is not a regression alpha.
+
+Zooming a chart does not change the metrics. The metrics use the sidebar dates.
+
+Live OHLC from Yahoo is fetched with `auto_adjust=True`, so the stock and the benchmark are adjusted the same way. The analysis itself always reads the `adj_close` column.
 
 ## Tests
 
@@ -92,62 +107,39 @@ Extra columns (adjusted close, vendor moving averages) are ignored. Pass `--tick
 python -m unittest discover -s tests -v
 ```
 
-The tests cover the sample contract, column layouts, bad files, the annualization math, the AAPL briefing numbers, and the guarantee that event callouts are not drawn on a file that does not cover those dates.
+`tests/test_calculations.py` checks hand-computed returns, the annualized-volatility formula, a known peak-to-trough drawdown (−25% from 120 to 90), moving-average warmup, date alignment without filling gaps, and that a jumpy window is labeled elevated against a calm history. `tests/test_pipeline.py` checks the bundled files, the offline briefing, a too-short window, the disk cache, and a live Yahoo fetch for AAPL, SPY, a Microsoft search, and an unknown symbol.
 
-## What the four panels show
-
-| Panel | Question |
-|---|---|
-| **Price** | Where has the close been? The bundled sample annotates 24 Aug 2015 and 9 Sep 2016. |
-| **Daily log returns** | What does the day-to-day move look like? |
-| **Rolling annualized volatility** | How has the risk regime changed? |
-| **Return vs volatility** | Are large days happening in an uptrend or a downtrend? Color is momentum, size is the absolute return. |
-
-Regime words used in the sentence:
-
-- **Volatility** is quiet below the 20th percentile of this file, elevated at or above the 80th, and typical in between. Ties use a mid-rank, so a flat series stays typical.
-- **Momentum** is an uptrend above +0.05 cumulative log return over the window, a downtrend below −0.05, and flat inside that band. The sentence also prints the simple percent change, `exp(log return) − 1`.
-
-## Architecture
-
-One direction. One file per job. `plots.py` does not read a CSV. `features.py` does not import matplotlib. `dashboard.py` is the only end-to-end path. `app.py` only collects inputs and displays that result.
+## Layout
 
 ```
-data_loader.py  →  features.py  →  plots.py  →  dashboard.py  →  app.py
-   (clean OHLCV)    (signals)       (figure)     (briefing)      (browser)
+data_loader.py   prices, search, 12-hour cache, bundled files
+features.py      returns, risk, averages, sentences
+plots.py         Plotly charts
+dashboard.py     one briefing, command line, Markdown summary
+app.py           the page
 ```
 
-## Quant choices
-
-- **Log returns** add across time and treat up and down moves symmetrically.
-- **Annualization uses √252**, the trading-day count, not √365.
-- **Rolling windows are causal.** Each point uses the past only, so the scatter is a view you could have had on that day.
-- **Volatility is ranked inside the loaded file.** "Elevated" means elevated for this history, not "above 20%" and not "above the VIX".
-
-## Data
-
-`aapl_raw.csv` is the public Apple series from the [plotly/datasets](https://github.com/plotly/datasets) collection, stored in the repo so the demo runs offline. The briefing uses the unadjusted close. This date range contains no split.
+`plots.py` does not read files. `features.py` does not draw. `dashboard.py` is the only place the pieces are assembled. `app.py` only collects inputs and displays that result.
 
 ## Known limitations
 
-- The bundled history ends on 16 Feb 2017. The briefing is about that sample, not today's market.
-- One ticker at a time. There is no portfolio, benchmark, or options view.
-- Event callouts are the two dates above. They are drawn only when the file covers them (within 7 calendar days).
-- The first 21 volatility points and the first 63 momentum points are blank on purpose. That warmup is the rolling window filling up.
-- A window longer than the file fails with a clear error instead of inventing a regime.
-- Closes are unadjusted. A file that spans a split will mix the pre-split and post-split price levels.
-- The vol label compares the stock with itself, inside the file you loaded.
-- The demo never places an order and never contacts a market-data API. A different history is an optional CSV you supply.
+- The live path needs Yahoo Finance to answer. There is no key, and there is also no contract: if Yahoo changes or rate-limits the request, the page shows the error and the offline demo is still in the sidebar.
+- yfinance 0.2.66 prints pandas deprecation warnings under pandas 3.1. The downloads used here still return adjusted history.
+- The volatility label is a rank inside one symbol's own history. A 25% year can be "typical" when older decades were wilder. Read the percentile next to the word. It is not a comparison with the VIX.
+- Offline AAPL is the 2017-vintage plotly file. Offline SPY was saved from Yahoo on 22 Nov 2026. Each comparison uses that file's own adjusted close and the chart rebases both to 100, so dollar levels are not overlaid. The two files were not adjusted on the same day.
+- The offline sample ends 16 Feb 2017.
+- One stock and one benchmark. No portfolio, no trades, no options.
+- The cache is a local `.cache/` directory, ignored by git, and it expires after 12 hours.
+- Symbol search returns equities and ETFs. A blank or a symbol with spaces or punctuation is rejected before any download.
 
 ## Publish on Streamlit Community Cloud
 
-This is the free host that matches the stack. No secret is required.
+No secret is required. The deployed app does need outbound HTTPS to Yahoo Finance for live symbols. The offline demo does not.
 
-1. Merge this project to `main` (or deploy the branch directly if you only want a preview).
-2. Open [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
-3. Choose **Create app**, then **Yup, I have an app**.
-4. Set the repository, branch `main`, and main file path `app.py`.
-5. Open **Advanced settings** and select **Python 3.12**. Leave secrets empty.
-6. Deploy. Community Cloud installs `requirements.txt` and starts `streamlit run app.py` from the repo root.
+1. Open [share.streamlit.io](https://share.streamlit.io) and sign in with the GitHub account that owns `mastermind7610/market_dashboard`.
+2. Choose **Create app**, then **Yup, I have an app**.
+3. Repository `mastermind7610/market_dashboard`, branch `main` after this pull request is merged (or branch `cursor/risk-regime-demo-5ee9` to preview the draft), main file path `app.py`.
+4. Under **Advanced settings**, select **Python 3.12**. Leave secrets empty.
+5. Deploy. Community Cloud installs `requirements.txt` and runs `streamlit run app.py`.
 
-The public URL looks like `https://<name>.streamlit.app`.
+The public URL is the subdomain chosen in that form, of the shape `https://<name>.streamlit.app`.

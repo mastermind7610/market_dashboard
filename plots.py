@@ -1,230 +1,156 @@
 """
 plots.py — THE PLOT LAYER
 ==========================
-Pure rendering. This module never reads a CSV. It draws the 2×2
-dashboard the orchestrator asks for:
-
-    price, with callouts when the file actually covers those dates
-    daily log returns
-    rolling annualized volatility
-    return-vs-volatility scatter (color = momentum, size = |return|)
+Interactive Plotly charts. This module does not read files and does not
+compute returns. Zooming a chart does not change the numbers in the briefing.
 """
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 
-# ---- Styling constants ------------------------------------------------------
-FIGSIZE = (14, 9)
-PRICE_COLOR = "steelblue"
-RETURN_COLOR = "gray"
-VOL_COLOR = "darkorange"
-SCATTER_CMAP = "RdYlGn"
+COLOR_PRICE = "#1f4b99"
+COLOR_MA_SHORT = "#d97706"
+COLOR_MA_LONG = "#64748b"
+COLOR_BENCH = "#0f766e"
+COLOR_DRAWDOWN = "#b45309"
+COLOR_VOL = "#1f4b99"
+GRID = "#e6ebf2"
+FONT = "Segoe UI, Helvetica Neue, Arial, sans-serif"
 
-# Maps |log return| onto marker area. A 2% day (0.02) becomes area 16,
-# large enough to see and small enough not to hide the rest of the cloud.
-# The legend uses the same scale, so the swatches match the points.
-RETURN_SIZE_SCALE = 800
-SIZE_LEGEND = (
-    (0.005, "|r| = 0.5%"),
-    (0.02, "|r| = 2%"),
-    (0.05, "|r| = 5%"),
-)
-
-# Callouts that sit inside the bundled AAPL sample. They are skipped
-# when the nearest trading day is farther away than this, so a file
-# from another year is not labeled with Apple's calendar.
-EVENT_SNAP_TOLERANCE_DAYS = 7
-# Dollar offsets were chosen for the bundled sample, whose median close
-# is about $113. Scaling by median / REFERENCE_PRICE keeps those labels
-# put on the sample and on-chart for a stock that trades at another level.
-REFERENCE_PRICE = 113.0
-EVENTS = (
-    ("2015-08-24", "China shock\n(Aug '15)", 25),
-    ("2016-09-09", "iPhone 7 launch\n(Sep '16)", 20),
-)
+PLOTLY_CONFIG = {
+    "scrollZoom": True,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+}
 
 
-def setup_figure() -> tuple[plt.Figure, np.ndarray]:
-    fig, axes = plt.subplots(2, 2, figsize=FIGSIZE)
-    fig.patch.set_facecolor("white")
-    for ax in axes.ravel():
-        ax.set_facecolor("white")
-    return fig, axes
+def price_chart(
+    price: pd.Series,
+    ma_short: pd.Series,
+    ma_long: pd.Series,
+    *,
+    ticker: str,
+    short_window: int,
+    long_window: int,
+) -> go.Figure:
+    """Adjusted close with the two simple moving averages. Rangeslider on."""
+    figure = _figure(f"{ticker} adjusted close")
+    _add_line(figure, price, ticker, COLOR_PRICE, width=2.2, hover="Adjusted close")
+    _add_line(figure, ma_short, f"{short_window}-day average", COLOR_MA_SHORT, width=1.4, hover="Average")
+    _add_line(figure, ma_long, f"{long_window}-day average", COLOR_MA_LONG, width=1.4, hover="Average")
+    figure.update_layout(xaxis_rangeslider_visible=True, yaxis_title="Adjusted close")
+    figure.update_yaxes(tickprefix="")
+    return figure
 
 
-def plot_price(ax: plt.Axes, df: pd.DataFrame) -> None:
-    ax.set_title(f"{df.attrs.get('ticker', '?')} Close Price", fontweight="bold")
-    ax.set_ylabel("Price (USD)")
-    ax.grid(True, alpha=0.3)
-    ax.plot(df.index, df["close"], color=PRICE_COLOR, linewidth=1.5)
-
-
-def plot_returns(ax: plt.Axes, df: pd.DataFrame) -> None:
-    ax.set_title("Daily Log Returns", fontweight="bold")
-    ax.set_ylabel("log return")
-    ax.grid(True, alpha=0.3)
-    ax.plot(df.index, df["log_return"], color=RETURN_COLOR, linewidth=0.8)
-    ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.5)
-
-
-def plot_volatility(ax: plt.Axes, df: pd.DataFrame) -> None:
-    vol_window = df.attrs.get("vol_window", 21)
-    vol_col = f"volatility_{vol_window}d"
-    ax.set_title(f"Rolling {vol_window}-Day Annualized Volatility", fontweight="bold")
-    ax.set_ylabel("annualized σ")
-    ax.grid(True, alpha=0.3)
-    ax.plot(df.index, df[vol_col], color=VOL_COLOR, linewidth=1.5)
-
-
-def plot_scatter(ax: plt.Axes, df: pd.DataFrame):
-    """Return the scatter handle so the colorbar can attach to it."""
-    vol_window = df.attrs.get("vol_window", 21)
-    mom_window = df.attrs.get("mom_window", 63)
-    vol_col = f"volatility_{vol_window}d"
-    mom_col = f"momentum_{mom_window}d"
-
-    ax.set_title("Return vs Volatility (color = momentum, size = |return|)",
-                 fontweight="bold")
-    ax.set_xlabel(f"{vol_window}d annualized volatility")
-    ax.set_ylabel("daily log return")
-    ax.grid(True, alpha=0.3)
-    ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.5)
-
-    # Warmup rows have no vol/momentum yet. Dropping them here is
-    # display logic: the feature layer keeps the NaNs on purpose.
-    sub = df[[vol_col, "log_return", mom_col]].dropna()
-
-    sc = ax.scatter(
-        x=sub[vol_col],
-        y=sub["log_return"],
-        c=sub[mom_col],
-        s=sub["log_return"].abs() * RETURN_SIZE_SCALE,
-        cmap=SCATTER_CMAP,
-        alpha=0.6,
-        edgecolors="black",
-        linewidths=0.3,
-    )
-    return sc
-
-
-def add_colorbar(fig: plt.Figure, ax: plt.Axes, scatter_handle, label: str) -> None:
-    """
-    Attach a colorbar so the gradient is a scale: red is negative
-    momentum, green is positive. Without it the colors are decoration.
-    """
-    cbar = fig.colorbar(scatter_handle, ax=ax, shrink=0.85, pad=0.02)
-    cbar.set_label(label, fontsize=9)
-    cbar.ax.tick_params(labelsize=8)
-
-
-def add_size_legend(ax: plt.Axes) -> None:
-    """
-    Manual size legend. Matplotlib will not build one for marker area,
-    so these are empty scatters: swatches for the legend, no data.
-    """
-    handles = []
-    for magnitude, label in SIZE_LEGEND:
-        handle = ax.scatter(
-            [],
-            [],
-            s=magnitude * RETURN_SIZE_SCALE,
-            color="gray",
-            alpha=0.6,
-            edgecolors="black",
-            linewidths=0.3,
-            label=label,
+def drawdown_chart(drawdown: pd.Series, *, ticker: str) -> go.Figure:
+    """Underwater chart of close-to-prior-peak declines inside the window."""
+    figure = _figure(f"{ticker} drawdown from the prior peak")
+    figure.add_trace(
+        go.Scatter(
+            x=drawdown.index,
+            y=drawdown.to_numpy(),
+            name="Drawdown",
+            mode="lines",
+            line=dict(color=COLOR_DRAWDOWN, width=1.6),
+            fill="tozeroy",
+            fillcolor="rgba(180, 83, 9, 0.18)",
+            hovertemplate="%{x|%Y-%m-%d}<br>Drawdown: %{y:.1%}<extra></extra>",
         )
-        handles.append(handle)
-
-    ax.legend(
-        handles=handles,
-        title="dot size",
-        loc="upper left",
-        fontsize=8,
-        title_fontsize=8,
-        framealpha=0.9,
-        labelspacing=1.2,
     )
+    figure.update_layout(yaxis_title="Decline from peak", yaxis_tickformat=".0%")
+    return figure
 
 
-def add_event_annotations(ax_price: plt.Axes, df: pd.DataFrame) -> None:
+def comparison_chart(
+    aligned: pd.DataFrame,
+    *,
+    ticker: str,
+    benchmark: str,
+) -> go.Figure | None:
     """
-    Arrows on the price chart for dates the loaded file actually covers.
-
-    The two events below are real episodes inside the bundled sample.
-    A nearest-date lookup without a tolerance would pin those labels
-    onto whatever history the caller loaded. The tolerance stops that.
+    Both adjusted-close paths rebased to 100 on the first shared session.
+    Levels from different files are not plotted in dollars against each other.
     """
-    if df.empty:
-        return
+    if aligned is None or len(aligned) < 2:
+        return None
+    base = aligned.iloc[0]
+    rebased = aligned / base * 100.0
+    figure = _figure(f"{ticker} and {benchmark}, rebased to 100")
+    _add_line(figure, rebased["stock"], ticker, COLOR_PRICE, width=2.2, hover="Index")
+    _add_line(figure, rebased["benchmark"], benchmark, COLOR_BENCH, width=2.0, hover="Index")
+    figure.update_layout(yaxis_title="Rebased to 100 on the first shared session")
+    return figure
 
-    median_price = float(df["close"].median())
-    scale = median_price / REFERENCE_PRICE if median_price > 0 else 1.0
-    tolerance = pd.Timedelta(days=EVENT_SNAP_TOLERANCE_DAYS)
 
-    for date_str, label, y_offset in EVENTS:
-        target = pd.Timestamp(date_str)
-        idx_pos = df.index.get_indexer([target], method="nearest")[0]
-        if idx_pos < 0:
-            continue
-        actual_date = df.index[idx_pos]
-        if abs(actual_date - target) > tolerance:
-            continue
-        price = float(df.loc[actual_date, "close"])
-        text_y = price + y_offset * scale
-        ax_price.annotate(
-            label,
-            xy=(actual_date, price),
-            xytext=(actual_date, text_y),
-            arrowprops=dict(arrowstyle="->", color="black", lw=0.8),
-            fontsize=8,
-            ha="center",
-            bbox=dict(
-                boxstyle="round,pad=0.3",
-                facecolor="white",
-                edgecolor="gray",
-                alpha=0.9,
-            ),
+def volatility_chart(
+    rolling: pd.Series,
+    *,
+    ticker: str,
+    window: int,
+    period_vol: float | None,
+) -> go.Figure:
+    """Rolling annualized volatility, with the window's own vol as a line."""
+    figure = _figure(f"{ticker} rolling {window}-day annualized volatility")
+    clean = rolling.dropna()
+    figure.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=clean.to_numpy(),
+            name=f"{window}-day vol",
+            mode="lines",
+            line=dict(color=COLOR_VOL, width=1.8),
+            hovertemplate="%{x|%Y-%m-%d}<br>Annualized vol: %{y:.1%}<extra></extra>",
         )
-
-
-def build_dashboard(df: pd.DataFrame) -> plt.Figure:
-    """Wire the four panels and the three reading aids. No file I/O."""
-    fig, axes = setup_figure()
-    ticker = df.attrs.get("ticker", "Market")
-    start = df.index.min().date().isoformat()
-    end = df.index.max().date().isoformat()
-    fig.suptitle(
-        f"{ticker} market dashboard    {start} to {end}",
-        fontsize=16,
-        fontweight="bold",
-        y=0.995,
     )
-
-    plot_price(axes[0, 0], df)
-    plot_returns(axes[0, 1], df)
-    plot_volatility(axes[1, 0], df)
-    scatter = plot_scatter(axes[1, 1], df)
-
-    mom_window = df.attrs.get("mom_window", 63)
-    add_colorbar(fig, axes[1, 1], scatter, label=f"{mom_window}d momentum")
-    add_size_legend(axes[1, 1])
-    add_event_annotations(axes[0, 0], df)
-
-    # Leave a strip at the top so the suptitle is not clipped.
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    return fig
+    if period_vol is not None:
+        figure.add_hline(
+            y=period_vol,
+            line_dash="dash",
+            line_color="#b45309",
+            annotation_text=f"Window vol {period_vol:.1%}",
+            annotation_position="top left",
+        )
+    figure.update_layout(yaxis_title="Annualized volatility", yaxis_tickformat=".0%")
+    return figure
 
 
-if __name__ == "__main__":
-    from data_loader import load_prices
-    from features import build_features
+def _figure(title: str) -> go.Figure:
+    figure = go.Figure()
+    figure.update_layout(
+        title=dict(text=title, x=0, xanchor="left", font=dict(size=18, color="#1c2430")),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        hovermode="x unified",
+        margin=dict(l=56, r=24, t=64, b=48),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        font=dict(family=FONT, color="#1c2430", size=13),
+        height=480,
+    )
+    figure.update_xaxes(showgrid=True, gridcolor=GRID, zeroline=False)
+    figure.update_yaxes(showgrid=True, gridcolor=GRID, zeroline=False)
+    return figure
 
-    prices = load_prices()
-    feats = build_features(prices)
-    fig = build_dashboard(feats)
-    fig.savefig("dashboard.png", dpi=120, bbox_inches="tight", facecolor="white")
-    print("Saved dashboard.png")
+
+def _add_line(
+    figure: go.Figure,
+    series: pd.Series,
+    name: str,
+    color: str,
+    *,
+    width: float,
+    hover: str,
+) -> None:
+    clean = series.dropna()
+    figure.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=clean.to_numpy(),
+            name=name,
+            mode="lines",
+            line=dict(color=color, width=width),
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>{hover}: %{{y:.2f}}<extra>{name}</extra>",
+        )
+    )

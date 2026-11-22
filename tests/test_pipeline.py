@@ -1,213 +1,156 @@
-"""Lightweight tests for the offline risk-regime briefing."""
+"""Offline briefing, loader guards, cache, and a live Yahoo check."""
 
 from __future__ import annotations
 
-import contextlib
-import io
-import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
-from dashboard import analyze, format_regime, main
-from data_loader import SAMPLE_CSV, load_prices
-from features import TRADING_DAYS, build_features, regime_snapshot
+from dashboard import run_briefing
+from data_loader import (
+    MarketDataError,
+    fetch_history,
+    load_offline_histories,
+    load_prices,
+    normalize_symbol,
+    search_symbols,
+)
+from features import AnalysisError
 
 
-def _write_prices(
-    path: Path,
-    n: int = 40,
-    prefix: str | None = None,
-    start: str = "2024-01-02",
-    *,
-    break_ohlc: bool = False,
-    duplicate_date: bool = False,
-    volume_nan_at: int | None = None,
-    reverse: bool = False,
-    extra_close: bool = False,
-) -> None:
-    dates = list(pd.bdate_range(start, periods=n))
-    if duplicate_date and n > 1:
-        dates[1] = dates[0]
-    close = 100 + np.linspace(0, 5, n)
-    open_ = close - 0.2
-    high = close + 0.5
-    low = close - 0.5
-    if break_ohlc:
-        high[3] = low[3] - 1
-    volume = np.full(n, 1_000_000.0)
-    if volume_nan_at is not None:
-        volume[volume_nan_at] = np.nan
-    frame = pd.DataFrame(
-        {
-            "Date": dates,
-            "Open": open_,
-            "High": high,
-            "Low": low,
-            "Close": close,
-            "Volume": volume,
-        }
-    )
-    if extra_close:
-        frame["AdjClose"] = close
-    if prefix:
-        frame = frame.rename(
-            columns={
-                "Open": f"{prefix}.Open",
-                "High": f"{prefix}.High",
-                "Low": f"{prefix}.Low",
-                "Close": f"{prefix}.Close",
-                "Volume": f"{prefix}.Volume",
-            }
+class OfflineBriefingTests(unittest.TestCase):
+    def test_bundled_files_cover_the_sample_window(self) -> None:
+        apple, spy = load_offline_histories()
+        self.assertEqual(apple.ticker, "AAPL")
+        self.assertEqual(spy.ticker, "SPY")
+        self.assertEqual(int(apple.frame.isna().sum().sum()), 0)
+        self.assertEqual(int(spy.frame.isna().sum().sum()), 0)
+        self.assertIn("adj_close", apple.frame.columns)
+        self.assertEqual(apple.frame.index.min().date().isoformat(), "2015-02-17")
+        self.assertEqual(apple.frame.index.max().date().isoformat(), "2017-02-16")
+        self.assertLess(spy.frame.index.min(), apple.frame.index.min())
+        self.assertGreaterEqual(spy.frame.index.max(), apple.frame.index.max())
+        # The bundled adjusted column is not a copy of the raw close.
+        self.assertGreater(
+            abs(float(apple.frame["adj_close"].iloc[0]) - float(apple.frame["close"].iloc[0])),
+            0.5,
         )
-    if reverse:
-        frame = frame.iloc[::-1]
-    frame.to_csv(path, index=False)
 
+    def test_offline_briefing_has_a_benchmark_gap_and_a_download(self) -> None:
+        briefing = run_briefing(offline=True, preset="Max")
+        stats = briefing.report.stats
+        self.assertEqual(stats.ticker, "AAPL")
+        self.assertEqual(stats.benchmark, "SPY")
+        self.assertGreater(stats.n_days, 400)
+        self.assertIsNotNone(stats.annualized_volatility)
+        self.assertLess(stats.max_drawdown, 0)
+        self.assertIsNotNone(stats.excess_return)
+        self.assertGreater(stats.aligned_days, 400)
+        self.assertIn("AAPL", briefing.report.sentences[0])
+        self.assertIn("SPY", " ".join(briefing.report.sentences))
+        self.assertIn("percentile rank", " ".join(briefing.report.sentences))
+        self.assertIn(stats.vol_label, " ".join(briefing.report.sentences))
+        self.assertIn("Yahoo Finance", briefing.markdown)
+        self.assertIn("plotly/datasets", briefing.markdown)
+        self.assertIsNotNone(briefing.figures["price"])
+        self.assertIsNotNone(briefing.figures["comparison"])
+        self.assertIsNone(briefing.stock.fetched_at)
 
-class PipelineTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        plt.close("all")
+    def test_offline_rejects_other_symbols(self) -> None:
+        with self.assertRaises(MarketDataError):
+            run_briefing(ticker="MSFT", offline=True, preset="Max")
 
-    def test_sample_contract(self) -> None:
-        prices = load_prices()
-        self.assertEqual(prices.attrs["ticker"], "AAPL")
-        self.assertEqual(list(prices.columns), ["open", "high", "low", "close", "volume"])
-        self.assertEqual(int(prices.isna().sum().sum()), 0)
-        self.assertTrue(prices.index.is_monotonic_increasing)
-        self.assertFalse(prices.index.has_duplicates)
-        self.assertEqual(prices.index.min().date().isoformat(), "2015-02-17")
-        self.assertEqual(prices.index.max().date().isoformat(), "2017-02-16")
-        self.assertAlmostEqual(float(prices.iloc[0]["close"]), 127.830002, places=4)
-        self.assertTrue(SAMPLE_CSV.is_file())
+    def test_a_shorter_preset_changes_the_window_and_the_return(self) -> None:
+        full = run_briefing(offline=True, preset="Max")
+        year_to_date = run_briefing(offline=True, preset="YTD")
+        self.assertLess(year_to_date.report.stats.n_days, full.report.stats.n_days)
+        self.assertNotEqual(
+            year_to_date.report.stats.cumulative_return,
+            full.report.stats.cumulative_return,
+        )
+        self.assertEqual(year_to_date.report.stats.window_start.date().isoformat(), "2017-01-03")
 
-    def test_sample_found_from_another_directory(self) -> None:
-        previous = os.getcwd()
+    def test_one_day_window_is_a_clear_error(self) -> None:
+        with self.assertRaises(AnalysisError) as caught:
+            run_briefing(offline=True, start="2016-06-06", end="2016-06-06", preset=None)
+        self.assertIn("two adjusted closes", str(caught.exception))
+
+    def test_missing_and_garbage_symbols_never_need_the_network(self) -> None:
+        with self.assertRaises(MarketDataError):
+            normalize_symbol("  ")
+        with self.assertRaises(MarketDataError):
+            normalize_symbol("AAPL;rm")
+        self.assertEqual(normalize_symbol("brk-b"), "BRK-B")
+
+    def test_generic_csv_and_duplicate_dates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            os.chdir(temp_dir)
-            try:
-                prices = load_prices()
-            finally:
-                os.chdir(previous)
-        self.assertEqual(len(prices), 506)
-
-    def test_generic_columns_and_explicit_ticker(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "generic.csv"
-            _write_prices(path, prefix=None)
-            prices = load_prices(path, ticker="demo")
-        self.assertEqual(prices.attrs["ticker"], "DEMO")
-        self.assertEqual(int(prices.isna().sum().sum()), 0)
-
-    def test_prefixed_ticker_is_inferred(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "msft.csv"
-            _write_prices(path, prefix="MSFT")
-            prices = load_prices(path)
-        self.assertEqual(prices.attrs["ticker"], "MSFT")
-
-    def test_missing_file_and_missing_column(self) -> None:
-        with self.assertRaises(FileNotFoundError):
-            load_prices("/tmp/market-dashboard-missing.csv")
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nocol.csv"
-            path.write_text("Date,Open\n2024-01-02,1\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
-                load_prices(path)
-
-    def test_duplicate_dates_and_impossible_bars(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "book.csv"
+            path.write_text(
+                "Date,Open,High,Low,Close,Volume\n"
+                "2024-01-02,10,11,9,10.5,100\n"
+                "2024-01-03,10,11,9,11,100\n",
+                encoding="utf-8",
+            )
+            frame = load_prices(path, ticker="demo")
+            self.assertEqual(frame.attrs["ticker"], "DEMO")
+            self.assertAlmostEqual(float(frame["adj_close"].iloc[-1]), 11.0)
             dup = Path(temp_dir) / "dup.csv"
-            bad = Path(temp_dir) / "bad.csv"
-            _write_prices(dup, duplicate_date=True)
-            _write_prices(bad, break_ohlc=True)
-            with self.assertRaises(ValueError):
+            dup.write_text(
+                "Date,Open,High,Low,Close,Volume\n"
+                "2024-01-02,10,11,9,10,100\n"
+                "2024-01-02,10,11,9,10,100\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(MarketDataError):
                 load_prices(dup)
-            with self.assertRaises(ValueError):
-                load_prices(bad)
 
-    def test_unsorted_input_is_sorted_and_volume_gap_is_filled(self) -> None:
+    def test_cache_is_reused_until_refresh(self) -> None:
+        frame = load_prices()
+        calls = {"n": 0}
+
+        def fake_download(ticker: str) -> pd.DataFrame:
+            calls["n"] += 1
+            out = frame.copy()
+            out.attrs["ticker"] = ticker
+            return out
+
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "messy.csv"
-            _write_prices(path, reverse=True, volume_nan_at=4)
-            prices = load_prices(path)
-        self.assertTrue(prices.index.is_monotonic_increasing)
-        self.assertEqual(int(prices["volume"].isna().sum()), 0)
-        self.assertEqual(float(prices["volume"].iloc[4]), 1_000_000.0)
+            with patch("data_loader._download_yahoo", fake_download):
+                first = fetch_history("AAPL", refresh=True, cache_dir=temp_dir)
+                second = fetch_history("AAPL", refresh=False, cache_dir=temp_dir)
+                third = fetch_history("AAPL", refresh=True, cache_dir=temp_dir)
+        self.assertEqual(calls["n"], 2)
+        self.assertFalse(first.from_cache)
+        self.assertTrue(second.from_cache)
+        self.assertEqual(second.fetched_at, first.fetched_at)
+        self.assertFalse(third.from_cache)
 
-    def test_log_return_warmup_and_annualization(self) -> None:
-        prices = load_prices()
-        feats = build_features(prices, vol_window=21, mom_window=63)
-        self.assertTrue(pd.isna(feats["log_return"].iloc[0]))
-        manual = float(np.log(feats["close"].iloc[1] / feats["close"].iloc[0]))
-        self.assertAlmostEqual(float(feats["log_return"].iloc[1]), manual, places=10)
 
-        # Index 21 is the first window that no longer touches the leading NaN.
-        window = feats["log_return"].iloc[1:22]
-        expected = float(window.std(ddof=1) * np.sqrt(TRADING_DAYS))
-        self.assertAlmostEqual(float(feats["volatility_21d"].iloc[21]), expected, places=10)
-        self.assertTrue(feats["volatility_21d"].iloc[:21].isna().all())
-        self.assertTrue(feats["momentum_63d"].iloc[:63].isna().all())
-        self.assertEqual(feats.attrs["vol_window"], 21)
-        self.assertEqual(feats.attrs["mom_window"], 63)
-        self.assertEqual(feats.attrs["ticker"], "AAPL")
+class LiveYahooTests(unittest.TestCase):
+    """Hits Yahoo Finance. Skips only when the host cannot be reached."""
 
-    def test_sample_briefing(self) -> None:
-        result = analyze()
-        regime = result.regime
-        text = format_regime(regime)
-        self.assertEqual(regime["ticker"], "AAPL")
-        self.assertEqual(regime["as_of"].date().isoformat(), "2017-02-16")
-        self.assertEqual(regime["trend"], "uptrend")
-        self.assertEqual(regime["volatility_regime"], "typical")
-        self.assertGreater(regime["volatility_peak"], regime["volatility"])
-        self.assertAlmostEqual(regime["close"], 135.350006, places=4)
-        self.assertIn("AAPL", text)
-        self.assertIn("2017-02-16", text)
-        self.assertIn("uptrend", text)
-        self.assertIn("typical", text)
-        self.assertIn("21.2%", text)
-        self.assertGreaterEqual(len(result.figure.axes), 4)
-        texts = [ann.get_text() for ax in result.figure.axes for ann in ax.texts]
-        self.assertTrue(any("China shock" in text for text in texts))
-
-    def test_events_outside_the_file_are_not_drawn(self) -> None:
+    def test_live_aapl_spy_search_and_a_bad_symbol(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "later.csv"
-            _write_prices(path, n=120, start="2024-01-02")
-            result = analyze(path, vol_window=21, mom_window=63)
-        texts = [ann.get_text() for ax in result.figure.axes for ann in ax.texts]
-        self.assertFalse(any("China shock" in text for text in texts))
-        self.assertEqual(result.regime["ticker"], "UNKNOWN")
-
-    def test_short_history_and_tiny_window_fail_clearly(self) -> None:
-        with self.assertRaises(ValueError):
-            analyze(vol_window=1)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "short.csv"
-            _write_prices(path, n=10)
-            with self.assertRaises(ValueError):
-                analyze(path, vol_window=21, mom_window=63)
-
-    def test_main_writes_png_without_using_the_cwd_sample_lookup(self) -> None:
-        previous = os.getcwd()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            os.chdir(temp_dir)
             try:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    out = main(
-                        ["--output", "briefing.png", "--vol-window", "21", "--mom-window", "63"]
-                    )
-            finally:
-                os.chdir(previous)
-            self.assertTrue(out.is_file())
-            self.assertGreater(out.stat().st_size, 10_000)
+                apple = fetch_history("AAPL", refresh=True, cache_dir=temp_dir)
+                spy = fetch_history("SPY", refresh=True, cache_dir=temp_dir)
+                hits = search_symbols("microsoft")
+            except MarketDataError as exc:
+                self.skipTest(f"Yahoo Finance unreachable: {exc}")
+        self.assertGreater(len(apple.frame), 2000)
+        self.assertEqual(apple.source.startswith("Yahoo Finance"), True)
+        self.assertIsNotNone(apple.fetched_at)
+        today = datetime.now(timezone.utc).date()
+        self.assertLessEqual((today - apple.latest_bar.date()).days, 7)
+        self.assertLessEqual((today - spy.latest_bar.date()).days, 7)
+        self.assertTrue(any(hit.symbol == "MSFT" for hit in hits))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(MarketDataError):
+                fetch_history("ZZZNOTREAL", refresh=True, cache_dir=temp_dir)
 
 
 if __name__ == "__main__":
