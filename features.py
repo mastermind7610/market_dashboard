@@ -1077,9 +1077,10 @@ def _window_mismatch(rows: tuple[PeriodStats, ...], rebased: pd.DataFrame | None
     if not late:
         return ""
     listing = ", ".join(f"{stats.ticker} on {stats.window_start.date().isoformat()}" for stats in late)
+    rows_word = "that row covers" if len(late) == 1 else "those rows cover"
     text = (
-        f"Not every symbol covers the same dates: {listing} begins later than "
-        f"{earliest.date().isoformat()}, so that row covers a shorter window."
+        f"Not every symbol covers the same dates. The earliest starts on "
+        f"{earliest.date().isoformat()}; starting later: {listing}, so {rows_word} a shorter window."
     )
     if rebased is not None:
         text += (

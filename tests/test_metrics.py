@@ -522,7 +522,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("BENCH, the benchmark, returned +2.9%", text)
         self.assertIn("1 of the 2 symbols finished ahead of it", text)
         self.assertIn("The deepest drawdown is LOSE's", text)
-        self.assertIn(f"LOSE on {self.dates[10].date().isoformat()} begins later", text)
+        self.assertIn(f"starting later: LOSE on {self.dates[10].date().isoformat()}, so that row covers", text)
         self.assertIn(f"The rebased chart starts on {self.dates[10].date().isoformat()}", text)
 
     def test_one_symbol_has_no_ranking_sentences(self) -> None:

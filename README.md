@@ -1,12 +1,25 @@
 # Market briefing
 
-A single-stock briefing you can show to a client. Pick a symbol, choose a window, and read the return, the risk, and the comparison with a benchmark. Every sentence on the page is filled from those calculations.
+A stock briefing you can show to a client. Pick up to five symbols and a benchmark, choose a window, and read each one's return, risk and drawdown, how closely it moved with the benchmark, and a plain-English summary. Every sentence on the page is filled from the calculations.
 
-Live prices come from Yahoo Finance through [yfinance](https://github.com/ranaroussi/yfinance). No API key. The bundled Apple file remains available as an explicit offline demo, with a saved SPY history for the same years.
+Live prices come from Yahoo Finance through [yfinance](https://github.com/ranaroussi/yfinance). No API key. An offline demo with bundled AAPL, MSFT, SPY and QQQ files is in the sidebar and is labelled as such.
 
-![AAPL versus SPY, one-year briefing](docs/screenshots/aapl_1y_overview.png)
+![AAPL, MSFT and NVDA against QQQ, one year](docs/screenshots/compare_overview.png)
 
-The numbers in the screenshots and the worked example below were produced on 22 Nov 2026, when the latest Yahoo bar was 20 Nov 2026. A later run prints new prices. The definitions do not change.
+The numbers in the screenshots and the worked examples below were produced on 22 Nov 2026, when the latest Yahoo bar was 20 Nov 2026. A later run prints new prices. The definitions do not change.
+
+## What it does
+
+| Feature | Where it came from |
+|---|---|
+| Compare up to five symbols on one chart, rebased to 100, with a benchmark you choose (SPY, QQQ, DIA, IWM, or any ticker you type) | TradingView's compare overlay on a shared percent scale, Yahoo Finance's chart comparison, Koyfin's comparison graph |
+| A side-by-side table: return, annualized return, volatility, drawdown, Sharpe, Sortino, beta, correlation, up and down capture | Portfolio Visualizer's risk and return metrics table |
+| Rolling 63-day beta and correlation | Portfolio Visualizer's rolling metrics. One number for the whole window hides how much the relationship moves |
+| Monthly returns heatmap and a daily return histogram | Portfolio Visualizer's monthly returns table; the histogram shows the tails that a volatility figure averages away |
+| Candlestick and volume view with moving averages you can resize, range buttons and a range slider | TradingView and Yahoo Finance charts |
+| A link that reproduces the view | TradingView and Koyfin saved views; finviz puts the whole screen in the URL |
+
+Left out on purpose: fundamentals and valuation, screeners, news, technical indicators beyond moving averages, and portfolio weights. They are the main business of the sites above, and none of them answers this page's question, which is how one stock behaved against a benchmark over a window.
 
 ## Setup
 
@@ -18,7 +31,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Pinned packages: `numpy==2.5.5`, `pandas==3.1.1`, `streamlit==1.67.0`, `yfinance==0.2.66`, `plotly==6.3.1`.
+Pinned packages: `numpy==2.5.5`, `pandas==3.1.1`, `streamlit==1.67.0`, `yfinance==0.2.66`, `plotly==6.3.1`. This round added no packages.
 
 ## Worked example
 
@@ -28,78 +41,185 @@ Pinned packages: `numpy==2.5.5`, `pandas==3.1.1`, `streamlit==1.67.0`, `yfinance
 streamlit run app.py
 ```
 
-Leave **Live market data** selected. The page loads AAPL against SPY for the last year.
+The page opens on AAPL against SPY for the last year. In the sidebar, add MSFT and NVDA under **Symbols** (pick from the list or type any ticker and press Enter) and set **Benchmark** to QQQ. On 22 Nov 2026, for 20 Nov 2025 through 20 Nov 2026:
 
-On 22 Nov 2026 that window was 252 trading days, 20 Nov 2025 through 20 Nov 2026:
+| Symbol | Return | Annualized return | Volatility | Max drawdown | Sharpe | Sortino | Beta | Correlation | Up capture | Down capture | Vs benchmark (pp) | Sessions |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| AAPL | +29.1% | +29.1% | 25.0% | -13.8% | 1.15 | 1.69 | 0.26 | 0.23 | 29% | 8% | +24.7 | 252 |
+| MSFT | +2.1% | +2.1% | 33.7% | -28.0% | 0.23 | 0.36 | 0.55 | 0.36 | 61% | 58% | -2.3 | 252 |
+| NVDA | -30.3% | -30.4% | 41.6% | -47.5% | -0.67 | -0.89 | 1.28 | 0.69 | 116% | 144% | -34.7 | 252 |
+| QQQ (benchmark) | +4.4% | +4.4% | 22.4% | -19.9% | 0.30 | 0.41 | — | — | — | — | — | 252 |
 
-- Cumulative return **+29.1%** (adjusted close 265.33 to 342.56)
-- Annualized volatility **25.0%**, labeled **typical** because that figure sits at percentile rank 24.3 of AAPL's own rolling 21-day volatilities (quiet is 20 or below, elevated is 80 or above)
-- Maximum drawdown **−13.8%**, from 285.20 on 2 Dec 2025 to 245.84 on 20 Jan 2026
-- Versus SPY **+22.3 percentage points** (SPY returned +6.9% on the same 252 sessions)
+**In focus** chooses which symbol the ten cards, the single-symbol charts and the sentences describe. The table and the comparison chart always show all of them.
 
-The status line names the source (Yahoo Finance, auto-adjusted OHLC), the latest bar in the download, and the time that download was fetched. A cached file is reused for 12 hours. **Refresh prices** downloads again.
+The page is laid out top to bottom:
 
-Change the window to 6M and the same symbol prints a different result: **+13.5%** over 129 sessions, volatility 27.4%, drawdown −12.7%. Switching the symbol to MSFT, still on 6M, prints **+15.8%**, volatility 37.0% (percentile rank 76.2, still typical), drawdown −23.4% from 1 Jun 2026 to 25 Jun 2026, and SPY at −6.5% over those shared sessions.
+1. **Date range**: 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y, Max, or **Custom** with a start and an end date.
+2. **Status**: the source, the latest bar and the fetch time for every symbol.
+3. **Cards**: cumulative return, annualized return, volatility, maximum drawdown, gap to the benchmark, Sharpe, Sortino, beta, correlation, volatility label. Each has a definition under its question mark.
+4. **Side by side**: the table above.
+5. **Charts**, in five tabs:
+   - **Compare**: every symbol rebased to 100 on the first session they all share. The benchmark is dashed.
+   - **Price**: adjusted close with two moving averages, as a line or as candles with volume.
+   - **Drawdown**: the stock's and the benchmark's decline from their running peaks.
+   - **Risk**: rolling 21-day volatility, and rolling 63-day beta and correlation.
+   - **Returns**: the daily return histogram over the benchmark's, and the monthly returns heatmap.
+6. **What the numbers say**: the sentences, and the definition of every figure and label.
+7. **Download analysis summary** (Markdown) and **Link to this view**.
 
-![AAPL and SPY rebased to 100](docs/screenshots/aapl_vs_spy_chart.png)
+![Candles, volume and resized averages](docs/screenshots/candlestick.png)
 
-![MSFT, six months](docs/screenshots/msft_6m.png)
+![Rolling volatility, beta and correlation](docs/screenshots/risk_rolling.png)
 
-An unknown symbol stops with a message and does not invent a chart:
+![Daily return histogram and monthly returns](docs/screenshots/returns_distribution.png)
 
-![Unknown symbol](docs/screenshots/invalid_ticker.png)
+![The sentences for the symbol in focus and across the symbols](docs/screenshots/explanation.png)
 
-**Download analysis summary** saves the same sentences and the definitions as Markdown.
+**Chart and risk settings** in the sidebar holds the two moving-average windows (2 to 400 days, the short one shorter than the long one) and the annual risk-free rate used by Sharpe and Sortino (0% to 20%, default 0%).
 
-The command-line form of the one-year AAPL briefing:
+### A custom range
+
+Choose **Custom** and set both dates. JPM and XOM against DIA, 2 Jan 2024 to 30 Jun 2025:
+
+| Symbol | Return | Annualized return | Volatility | Max drawdown | Sharpe | Sortino | Beta | Correlation | Up capture | Down capture | Vs benchmark (pp) | Sessions |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| JPM | +74.5% | +45.2% | 25.5% | -24.4% | 1.60 | 2.37 | 1.20 | 0.72 | 122% | 89% | +54.7 | 374 |
+| XOM | +10.9% | +7.2% | 22.4% | -18.9% | 0.43 | 0.58 | 0.63 | 0.43 | 58% | 56% | -8.9 | 374 |
+| DIA (benchmark) | +19.8% | +12.9% | 15.3% | -16.0% | 0.87 | 1.29 | — | — | — | — | — | 374 |
+
+![JPM and XOM against DIA over a custom range](docs/screenshots/custom_range.png)
+
+### Links
+
+Every control writes itself into the address bar, so the address is the view. A setting left at its default is omitted.
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| `symbols` | One per symbol, repeated: `symbols=AAPL&symbols=MSFT` | `AAPL` |
+| `benchmark` | Benchmark ticker | `SPY` |
+| `range` | `1M` `3M` `6M` `YTD` `1Y` `3Y` `5Y` `Max` `Custom` | `1Y` |
+| `start`, `end` | `YYYY-MM-DD`, read when `range=Custom` | the last year |
+| `focus` | The symbol the cards and sentences describe | the first symbol |
+| `ma_short`, `ma_long` | Moving-average windows in days | `50`, `200` |
+| `rf` | Annual risk-free rate, in percent | `0` |
+| `tab` | `Compare` `Price` `Drawdown` `Risk` `Returns` | `Compare` |
+| `chart` | `Line` or `Candlestick` on the Price tab | `Line` |
+| `data` | `Live` or `Offline` | `Live` |
+
+The custom-range example above is `?symbols=JPM&symbols=XOM&benchmark=DIA&range=Custom&start=2024-01-02&end=2025-06-30`. A value the page cannot use, such as a symbol the offline demo does not have, is dropped and the default is used.
+
+### When something is wrong
+
+One unknown symbol among several is left out with a warning, and the rest of the briefing still renders:
+
+![One unknown symbol among two](docs/screenshots/partial_failure.png)
+
+When no symbol loads, the page stops with the reason and points to the offline demo. It does not draw an empty chart:
+
+![Only an unknown symbol](docs/screenshots/invalid_ticker.png)
+
+Other cases, each with its own message:
+
+- **A range with one trading day**: "AAPL has 1 trading day(s) between … A return needs two adjusted closes. Widen the range."
+- **A range too short for a figure**: that card shows a dash and its question mark says what it needs. Annualized return needs 360 calendar days, Sharpe, Sortino, beta and correlation need 20 daily returns, and each capture ratio needs 10 days on its side.
+- **Yahoo not answering**: a download that is older than 12 hours is used if one is on disk, and the page says the prices are from an older download and when it was fetched. With nothing on disk, the page shows the error and the offline demo is one click away.
+- **Benchmark unavailable**: the stock figures still show, and the benchmark cards show a dash.
+- **Moving averages in the wrong order**: "The short average (300 days) must be shorter than the long average (100 days)."
+- **The benchmark is also in the symbol list**: it is removed from the list with a note.
+
+### Command line
 
 ```bash
-python dashboard.py --ticker AAPL --benchmark SPY --preset 1Y
+python dashboard.py --tickers AAPL MSFT NVDA --benchmark QQQ --preset 1Y
 ```
 
 ```text
-AAPL adjusted close moved from 265.33 on 2025-11-20 to 342.56 on 2026-11-20: a cumulative return of +29.1% across 252 trading days.
+AAPL adjusted close moved from 265.33 on 2025-11-20 to 342.56 on 2026-11-20: a cumulative return of +29.1% across 252 trading days. Over 365 calendar days that compounds to +29.1% a year.
 Annualized volatility is 25.0%, from 251 daily log returns. The label is typical: this 25.0% sits at percentile rank 24.3 of the 11558 rolling 21-day volatilities in the loaded history. Quiet is 20% or below, elevated is 80% or above, and the rank between them is typical.
+The Sharpe ratio is 1.15 and the Sortino ratio is 1.69, at a risk-free rate of 0.0% a year. Both are positive because the average daily return was above that rate.
 Maximum drawdown is -13.8%, from a peak of 285.20 on 2025-12-02 to a trough of 245.84 on 2026-01-20.
+The best day was +5.3% on 2026-11-04 and the worst was -7.4% on 2026-07-31. 52% of the 251 daily moves were gains.
 On 2026-11-20 the close is above the 50-day average of 341.59. The close is above the 200-day average of 302.79.
-On the 252 shared sessions, AAPL returned +29.1% and SPY returned +6.9%. AAPL is 22.3 percentage points higher. Every session in the stock window has a benchmark print.
+On the 252 shared sessions, AAPL returned +29.1% and QQQ returned +4.4%. AAPL is 24.7 percentage points higher. Every session in the stock window has a benchmark print.
+Against QQQ, beta is 0.26 (low: zero to 0.80) and the correlation of daily returns is 0.23 (weak: size below 0.30), from 251 shared daily returns. A beta of 0.26 means AAPL moved about 0.26% on average, in the same direction, for each 1% move in QQQ.
+On the 133 days QQQ rose, AAPL's average daily return was 29% of QQQ's (up capture). On the 118 days QQQ fell, it was 8% (down capture).
+Ranked by cumulative return: AAPL +29.1%, MSFT +2.1%, NVDA -30.3%. QQQ, the benchmark, returned +4.4% over its own sessions in the range, and 1 of the 3 symbols finished ahead of it.
+Annualized volatility runs from 25.0% (AAPL) to 41.6% (NVDA).
+The deepest drawdown is NVDA's -47.5%; the shallowest is AAPL's -13.8%.
+Per unit of volatility, AAPL ranks first with a Sharpe ratio of 1.15 and NVDA last at -0.67, at a risk-free rate of 0.0% a year.
 Saved summary to analysis.md
 ```
 
-Other presets: `1M`, `3M`, `6M`, `YTD`, `1Y`, `3Y`, `5Y`, `Max`. Or pass both `--start` and `--end` as `YYYY-MM-DD`.
+Flags: `--ticker` or `--tickers` (up to five), `--benchmark`, `--focus`, `--preset` (`1M` `3M` `6M` `YTD` `1Y` `3Y` `5Y` `Max`) or both `--start` and `--end` as `YYYY-MM-DD`, `--ma-short`, `--ma-long`, `--risk-free` (percent a year), `--offline`, `--refresh`, `--output`.
 
 ### Offline demo
 
-In the sidebar choose **Offline demo**. Nothing is downloaded. The stock is `aapl_raw.csv` (plotly/datasets, using the `AAPL.Adjusted` column). The benchmark is `spy_sample.csv`, a Yahoo Finance auto-adjusted SPY history for Feb 2015–Feb 2017 saved in this repo on 22 Nov 2026.
+In the sidebar choose **Offline**. Nothing is downloaded, and the label above the title reads "Market briefing · offline demo". Four files are bundled:
+
+| Symbol | File | Source | Sessions |
+|---|---|---|---|
+| AAPL | `aapl_raw.csv` | plotly/datasets, using the `AAPL.Adjusted` column | 17 Feb 2015 – 16 Feb 2017 |
+| MSFT | `msft_sample.csv` | Yahoo Finance auto-adjusted bars saved on 22 Nov 2026 | 2 Feb 2015 – 17 Feb 2017 |
+| SPY | `spy_sample.csv` | Yahoo Finance auto-adjusted bars saved on 22 Nov 2026 | 2 Feb 2015 – 17 Feb 2017 |
+| QQQ | `qqq_sample.csv` | Yahoo Finance auto-adjusted bars saved on 22 Nov 2026 | 2 Feb 2015 – 17 Feb 2017 |
+
+AAPL and MSFT can be compared against SPY or QQQ. Any other symbol asks you to switch to live data.
 
 ```bash
-python dashboard.py --offline --preset Max
+python dashboard.py --offline --tickers AAPL MSFT --benchmark QQQ --preset Max
 ```
 
-```text
-AAPL adjusted close moved from 122.91 on 2015-02-17 to 135.35 on 2017-02-16: a cumulative return of +10.1% across 506 trading days.
-Annualized volatility is 24.3%, from 505 daily log returns. The label is typical: this 24.3% sits at percentile rank 60.8 of the 485 rolling 21-day volatilities in the loaded history.
-Maximum drawdown is -30.4%, from a peak of 127.97 on 2015-05-22 to a trough of 89.01 on 2016-05-12.
-On 2017-02-16 the close is above the 50-day average of 120.50. The close is above the 200-day average of 108.17.
-On the 506 shared sessions, AAPL returned +10.1% and SPY returned +16.5%. AAPL is 6.3 percentage points lower. Every session in the stock window has a benchmark print.
-```
+| Symbol | Return | Annualized return | Volatility | Max drawdown | Sharpe | Sortino | Beta | Correlation | Up capture | Down capture | Vs benchmark (pp) | Sessions |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| AAPL | +10.1% | +4.9% | 24.3% | -30.4% | 0.32 | 0.45 | 1.06 | 0.72 | 104% | 109% | -13.2 | 506 |
+| MSFT | +66.2% | +28.2% | 23.8% | -16.6% | 1.16 | 1.86 | 1.12 | 0.77 | 114% | 100% | +36.2 | 517 |
+| QQQ (benchmark) | +30.0% | +13.7% | 16.5% | -16.1% | 0.86 | 1.21 | — | — | — | — | — | 517 |
 
-![Offline Apple demo](docs/screenshots/offline_demo.png)
+AAPL's file starts ten sessions after the others and ends one session earlier. Its row covers its own 506 sessions, its gap of −13.2 points is measured on the sessions it shares with QQQ (QQQ returned +23.4% on those), and the page says so in a sentence.
 
-The offline demo only contains AAPL and SPY. Other symbols ask you to switch back to live data. A one-day window reports that a return needs two adjusted closes.
+![Offline demo, AAPL and MSFT against QQQ](docs/screenshots/offline_demo.png)
 
 ## How the figures are defined
 
+All figures use the adjusted close. The same text is on the page under **How every figure and label is defined**, written from the constants the code uses.
+
+**Return and risk**
+
 - **Cumulative return** is the adjusted close on the last session of the window divided by the adjusted close on the first session, minus one.
-- **Annualized volatility** is the sample standard deviation (divisor N−1) of daily log returns inside the window, multiplied by the square root of 252. Log return is the natural log of today's adjusted close over yesterday's. At least two daily returns are required.
-- **Maximum drawdown** is the deepest decline from a prior peak to a later close inside the window. The peak is the highest adjusted close on or before the trough. A window that never closes below a prior peak has a drawdown of zero.
-- **Moving averages** are simple averages of adjusted close, 50 days and 200 days. They are computed on the full loaded history and then drawn on the selected dates, so a 200-day average can appear inside a shorter window when earlier bars were loaded.
-- **Volatility label.** The window's annualized volatility is ranked against this symbol's rolling 21-day annualized volatilities on the **full loaded history**, not only inside the window. Quiet means a percentile rank of 20% or below. Elevated means 80% or above. A rank between those cuts is typical. The rank is the share of baseline windows strictly below the period volatility, plus half the share that tie. The label is withheld when fewer than 30 baseline windows exist. The page prints the rank next to the word, so the cut is visible.
-- **Benchmark gap.** Dates are an inner join: a session missing on either side is left out, not filled. Both series are adjusted closes. Each cumulative return runs from the first shared session to the last. The gap is the stock's cumulative return minus the benchmark's, in percentage points. It is not a regression alpha.
+- **Annualized return (CAGR)** is one plus the cumulative return, raised to 365.25 divided by the calendar days between the first and last session, minus one. It is withheld when the window spans fewer than 360 calendar days, because compounding a few months into a yearly rate reports a return nobody earned.
+- **Annualized volatility** is the sample standard deviation (divisor N−1) of daily log returns inside the window, multiplied by the square root of 252. At least two daily returns are required.
+- **Maximum drawdown** is the deepest decline from a prior peak to a later close inside the window. A window that never closes below a prior peak has a drawdown of zero.
+- **Best day, worst day** are the largest and smallest daily simple returns in the window. The share of gains is the fraction of daily returns above zero.
+- **Moving averages** are simple averages of adjusted close, 50 and 200 days unless changed. They are computed on the full loaded history and then drawn on the selected dates, so a 200-day average can appear inside a shorter window.
+- **Monthly returns** chain inside the window: each month's last adjusted close over the previous month's last, with the window's first close as the base of the first month. The first and last months can be partial. Compounded, the cells equal the cumulative return.
 
-Zooming a chart does not change the metrics. The metrics use the sidebar dates.
+**Return per unit of risk**
 
-Live OHLC from Yahoo is fetched with `auto_adjust=True`, so the stock and the benchmark are adjusted the same way. The analysis itself always reads the `adj_close` column.
+- **Sharpe ratio** is the mean daily simple return above the daily risk-free rate, divided by the sample standard deviation of those excess returns, multiplied by the square root of 252. The daily risk-free rate is (1 + annual rate)^(1/252) − 1.
+- **Sortino ratio** has the same numerator. Its denominator is the downside deviation: the square root of the mean squared shortfall below the risk-free rate, where days at or above the rate count as zero and every day is in the divisor.
+- Both need at least 20 daily returns. A window with no day below the rate has no Sortino ratio.
+
+**Against the benchmark**
+
+- **Benchmark gap.** Dates are an inner join: a session missing on either side is left out, not filled. Each cumulative return runs from the first shared session to the last. The gap is the stock's return minus the benchmark's, in percentage points. It is not a regression alpha.
+- **Beta** is the sample covariance of the stock's and the benchmark's daily simple returns on shared sessions, divided by the benchmark's sample variance. At least 20 shared daily returns.
+- **Correlation** is the Pearson correlation of the same pairs.
+- **Up capture** is the stock's mean daily return on the days the benchmark rose, divided by the benchmark's mean daily return on those days. **Down capture** is the same on the days it fell. Each side needs at least 10 days. This is a daily arithmetic version, not the monthly compounded figure fund fact sheets print.
+- **Rolling beta and correlation** use the trailing 63 shared daily returns, computed on the full loaded history and then shown on the selected dates.
+
+**Labels**
+
+| Label | Rule |
+|---|---|
+| Volatility: quiet / typical / elevated | The window's annualized volatility is ranked against this symbol's rolling 21-day annualized volatilities on the full loaded history. Quiet is a percentile rank of 20% or below, elevated is 80% or above, typical is between. Withheld under 30 baseline windows. The page prints the rank next to the word |
+| Beta: high / market-like / low / inverse | High at 1.20 or above, low from zero to 0.80, inverse below zero, market-like between 0.80 and 1.20 |
+| Correlation: strong / moderate / weak | Strong when its size is 0.70 or more, weak below 0.30, moderate between. A negative value is labelled negative |
+
+**Comparing several symbols.** Each row of the table uses that symbol's own sessions inside the range. The rebased chart starts every line at 100 on the first session all of them share. When one symbol starts later than the others, a sentence says which and from when.
+
+Zooming a chart, or pressing its range buttons, changes the view only. The figures use the range selected above the briefing.
+
+Live OHLC from Yahoo is fetched with `auto_adjust=True`, so every symbol is adjusted the same way. The candles are scaled by adjusted close over close so they line up with the averages.
 
 ## Tests
 
@@ -107,13 +227,18 @@ Live OHLC from Yahoo is fetched with `auto_adjust=True`, so the stock and the be
 python -m unittest discover -s tests -v
 ```
 
-`tests/test_calculations.py` checks hand-computed returns, the annualized-volatility formula, a known peak-to-trough drawdown (−25% from 120 to 90), moving-average warmup, date alignment without filling gaps, and that a jumpy window is labeled elevated against a calm history. `tests/test_pipeline.py` checks the bundled files, the offline briefing, a too-short window, the disk cache, and a live Yahoo fetch for AAPL, SPY, a Microsoft search, and an unknown symbol.
+96 tests.
+
+- `tests/test_calculations.py` (11): hand-computed returns, the annualized-volatility formula, a known peak-to-trough drawdown (−25% from 120 to 90), moving-average warmup, date alignment without filling gaps, and a jumpy window labelled elevated against a calm history.
+- `tests/test_metrics.py` (45): known answers for annualized return, the daily risk-free rate, Sharpe, downside deviation, Sortino, beta, correlation, up and down capture, best and worst day, rolling beta and correlation, monthly returns and their table, adjusted candles, rebasing and shared sessions, each label cut, and the settings limits. Edge cases: a part-year window, too few returns, a flat series, no losing days, a benchmark that never moved, too few up or down days, windows in the wrong order. One case builds a stock that moves exactly twice the benchmark each day and checks beta 2, correlation 1 and capture 200% through the whole pipeline.
+- `tests/test_pipeline.py` (23): the four bundled files, offline briefings, several symbols against a chosen benchmark, one bad symbol among several, every symbol bad, the benchmark listed as a symbol, more than five symbols, a symbol with no sessions in the range, settings passed through and rejected, the disk cache, an outage served from an expired download and an outage with nothing on disk, the command line, and live Yahoo fetches (skipped if Yahoo is unreachable).
+- `tests/test_app.py` (17): the page itself, driven headless with Streamlit's `AppTest`. The cards match the calculation, a link reproduces a multi-symbol view and the page writes the same link back, a custom range, a one-day range, changing the range, the focus and the benchmark, averages in the wrong order, a symbol the offline demo lacks, an empty symbol list, and live mode with the download stubbed: one unknown ticker, only unknown tickers, an outage, a missing benchmark.
 
 ## Layout
 
 ```
 data_loader.py   prices, search, 12-hour cache, bundled files
-features.py      returns, risk, averages, sentences
+features.py      returns, risk, ratios, benchmark relationship, comparison, sentences
 plots.py         Plotly charts
 dashboard.py     one briefing, command line, Markdown summary
 app.py           the page
@@ -123,13 +248,17 @@ app.py           the page
 
 ## Known limitations
 
-- The live path needs Yahoo Finance to answer. There is no key, and there is also no contract: if Yahoo changes or rate-limits the request, the page shows the error and the offline demo is still in the sidebar.
+- The live path needs Yahoo Finance to answer. There is no key, and there is also no contract. If Yahoo changes or rate-limits the request, the page falls back to an older download when one is on disk and otherwise shows the error. On Streamlit Community Cloud the disk is wiped when the app restarts, so that fallback only covers symbols loaded since the last restart.
 - yfinance 0.2.66 prints pandas deprecation warnings under pandas 3.1. The downloads used here still return adjusted history.
-- The volatility label is a rank inside one symbol's own history. A 25% year can be "typical" when older decades were wilder. Read the percentile next to the word. It is not a comparison with the VIX.
-- Offline AAPL is the 2017-vintage plotly file. Offline SPY was saved from Yahoo on 22 Nov 2026. Each comparison uses that file's own adjusted close and the chart rebases both to 100, so dollar levels are not overlaid. The two files were not adjusted on the same day.
-- The offline sample ends 16 Feb 2017.
-- One stock and one benchmark. No portfolio, no trades, no options.
-- The cache is a local `.cache/` directory, ignored by git, and it expires after 12 hours.
+- The risk-free rate is one number you set, 0% by default. It is not a Treasury bill series. Sharpe and Sortino at 0% are higher than a fact sheet's when rates are above zero.
+- Sharpe, Sortino, beta and capture are computed from daily returns. Portfolio Visualizer and fund fact sheets use monthly returns, so their figures for the same period will differ.
+- The volatility label is a rank inside one symbol's own history. A 25% year can be "typical" when older decades were wilder. Read the percentile next to the word.
+- The table gives each symbol its own sessions. A symbol that listed part-way through the range has a shorter row, and its return is not comparable with the others until the range is narrowed to dates they share. The page names the symbol and the date.
+- Rolling beta and correlation need 63 shared daily returns of history before the first point.
+- Five symbols at most, equal standing. No portfolio weights, no trades, no options, no fundamentals.
+- Offline AAPL is the 2017-vintage plotly file. The other three offline files were saved from Yahoo on 22 Nov 2026, so AAPL was not adjusted on the same day as its benchmark. The offline sample ends in Feb 2017.
+- With `range=Custom` left on the dates the page proposes, the address bar omits `start` and `end`, so that address would move with the calendar. **Link to this view** always writes the two dates out. That box does not carry `tab` or `chart`; the address bar does.
+- The cache is a local `.cache/` directory, ignored by git, reused for 12 hours.
 - Symbol search returns equities and ETFs. A blank or a symbol with spaces or punctuation is rejected before any download.
 
 ## Publish on Streamlit Community Cloud
@@ -142,4 +271,4 @@ No secret is required. The deployed app does need outbound HTTPS to Yahoo Financ
 4. Under **Advanced settings**, select **Python 3.12**. Leave secrets empty.
 5. Deploy. Community Cloud installs `requirements.txt` and runs `streamlit run app.py`.
 
-The public URL is the subdomain chosen in that form, of the shape `https://<name>.streamlit.app`.
+The public URL is the subdomain chosen in that form, of the shape `https://<name>.streamlit.app`. A push to the deployed branch redeploys the app.
