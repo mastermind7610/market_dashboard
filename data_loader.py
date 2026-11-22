@@ -9,6 +9,10 @@ Live bars use yfinance with auto_adjust=True, so open, high, low, and
 close are split- and dividend-adjusted together. The adjusted close is
 copied into ``adj_close`` and is the only series the analysis uses.
 The bundled Apple file keeps its own adjusted column. No API key.
+
+When Yahoo does not answer and an older download is on disk, that older
+download is returned and marked stale, so an outage degrades to dated
+prices rather than a blank page.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent
 SAMPLE_CSV = ROOT / "aapl_raw.csv"
 SPY_SAMPLE = ROOT / "spy_sample.csv"
+MSFT_SAMPLE = ROOT / "msft_sample.csv"
+QQQ_SAMPLE = ROOT / "qqq_sample.csv"
 CACHE_DIR = ROOT / ".cache"
 
 # A fresh download is reused for this long. The on-screen "fetched"
@@ -41,6 +47,24 @@ OFFLINE_SPY_SOURCE = (
     "Offline demo — bundled spy_sample.csv "
     "(Yahoo Finance auto-adjusted SPY bars saved 2026-11-22, not a live request)"
 )
+OFFLINE_MSFT_SOURCE = (
+    "Offline demo — bundled msft_sample.csv "
+    "(Yahoo Finance auto-adjusted MSFT bars saved 2026-11-22, not a live request)"
+)
+OFFLINE_QQQ_SOURCE = (
+    "Offline demo — bundled qqq_sample.csv "
+    "(Yahoo Finance auto-adjusted QQQ bars saved 2026-11-22, not a live request)"
+)
+
+# Everything the offline demo can show. Two stocks and two index funds
+# are enough to exercise the multi-symbol comparison with the network off.
+OFFLINE_BUNDLE = {
+    "AAPL": (SAMPLE_CSV, OFFLINE_AAPL_SOURCE),
+    "MSFT": (MSFT_SAMPLE, OFFLINE_MSFT_SOURCE),
+    "SPY": (SPY_SAMPLE, OFFLINE_SPY_SOURCE),
+    "QQQ": (QQQ_SAMPLE, OFFLINE_QQQ_SOURCE),
+}
+OFFLINE_BENCHMARKS = ("SPY", "QQQ")
 
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 _CANONICAL = ("date", "open", "high", "low", "close", "volume")
@@ -66,6 +90,8 @@ class PriceHistory:
     fetched_at: pd.Timestamp | None
     latest_bar: pd.Timestamp
     from_cache: bool
+    # True when Yahoo did not answer and an expired download was served.
+    stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -131,14 +157,36 @@ def load_prices(path: str | Path | None = None, ticker: str | None = None) -> pd
     return df
 
 
+def offline_symbols() -> tuple[str, ...]:
+    """Symbols the offline demo ships, in display order."""
+    return tuple(OFFLINE_BUNDLE)
+
+
+def load_offline_history(symbol: str) -> PriceHistory:
+    """One bundled symbol. No network. Anything else is a clear error."""
+    ticker = normalize_symbol(symbol)
+    if ticker not in OFFLINE_BUNDLE:
+        bundled = ", ".join(OFFLINE_BUNDLE)
+        raise MarketDataError(
+            f"The offline demo only includes {bundled}. "
+            f"Switch to live market data for {ticker}."
+        )
+    path, source = OFFLINE_BUNDLE[ticker]
+    frame = load_prices(path, ticker=ticker)
+    return _as_history(frame, ticker, source, fetched_at=None, from_cache=False)
+
+
+def offline_span() -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The first and the last date any bundled file covers."""
+    frames = [load_offline_history(symbol).frame for symbol in OFFLINE_BUNDLE]
+    first = min(frame.index.min() for frame in frames)
+    last = max(frame.index.max() for frame in frames)
+    return pd.Timestamp(first), pd.Timestamp(last)
+
+
 def load_offline_histories() -> tuple[PriceHistory, PriceHistory]:
     """Bundled AAPL and the saved SPY sample. No network."""
-    apple = load_prices(SAMPLE_CSV, ticker="AAPL")
-    spy = load_prices(SPY_SAMPLE, ticker="SPY")
-    return (
-        _as_history(apple, "AAPL", OFFLINE_AAPL_SOURCE, fetched_at=None, from_cache=False),
-        _as_history(spy, "SPY", OFFLINE_SPY_SOURCE, fetched_at=None, from_cache=False),
-    )
+    return load_offline_history("AAPL"), load_offline_history("SPY")
 
 
 def fetch_history(
@@ -150,6 +198,10 @@ def fetch_history(
     """
     Daily history for one symbol. A cached file younger than
     CACHE_TTL_HOURS is returned unless ``refresh`` is set.
+
+    If the download fails and an expired file is still on disk, that
+    file is returned with ``stale=True``. A symbol that was never
+    downloaded has nothing to fall back on and raises.
     """
     ticker = normalize_symbol(symbol)
     directory = CACHE_DIR if cache_dir is None else Path(cache_dir)
@@ -158,7 +210,13 @@ def fetch_history(
         if cached is not None:
             return cached
 
-    frame = _download_yahoo(ticker)
+    try:
+        frame = _download_yahoo(ticker)
+    except MarketDataError:
+        expired = _read_cache(ticker, directory, allow_expired=True)
+        if expired is None:
+            raise
+        return expired
     fetched_at = pd.Timestamp(datetime.now(timezone.utc))
     _write_cache(ticker, frame, fetched_at, directory)
     return _as_history(frame, ticker, YAHOO_SOURCE, fetched_at=fetched_at, from_cache=False)
@@ -235,8 +293,9 @@ def _download_yahoo(ticker: str) -> pd.DataFrame:
     frame = _normalize_yahoo(raw, ticker)
     if frame.empty:
         raise MarketDataError(
-            f"No price history for {ticker}. Check the symbol, "
-            "or switch to the offline Apple demo."
+            f"No price history for {ticker}. Yahoo Finance returned nothing: "
+            "the symbol may not exist, or Yahoo may not be answering right now. "
+            "Check the symbol, or switch to the offline demo."
         )
     return frame
 
@@ -280,6 +339,7 @@ def _as_history(
     *,
     fetched_at: pd.Timestamp | None,
     from_cache: bool,
+    stale: bool = False,
 ) -> PriceHistory:
     frame.attrs["ticker"] = ticker
     frame.attrs["source"] = source
@@ -291,6 +351,7 @@ def _as_history(
         fetched_at=None if fetched_at is None else pd.Timestamp(fetched_at),
         latest_bar=latest,
         from_cache=from_cache,
+        stale=stale,
     )
 
 
@@ -298,7 +359,16 @@ def _cache_paths(ticker: str, directory: Path) -> tuple[Path, Path]:
     return directory / f"{ticker}.csv", directory / f"{ticker}.json"
 
 
-def _read_cache(ticker: str, directory: Path) -> PriceHistory | None:
+def _read_cache(
+    ticker: str,
+    directory: Path,
+    *,
+    allow_expired: bool = False,
+) -> PriceHistory | None:
+    """
+    A download saved earlier. An expired file is only returned when the
+    caller asks for it, and it comes back marked stale.
+    """
     csv_path, meta_path = _cache_paths(ticker, directory)
     if not csv_path.is_file() or not meta_path.is_file():
         return None
@@ -306,7 +376,8 @@ def _read_cache(ticker: str, directory: Path) -> PriceHistory | None:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         fetched_at = pd.Timestamp(meta["fetched_at"])
         age = pd.Timestamp(datetime.now(timezone.utc)) - fetched_at
-        if age > pd.Timedelta(hours=CACHE_TTL_HOURS):
+        expired = age > pd.Timedelta(hours=CACHE_TTL_HOURS)
+        if expired and not allow_expired:
             return None
         frame = pd.read_csv(csv_path, index_col="date", parse_dates=True)
         frame.index = pd.DatetimeIndex(frame.index).tz_localize(None).normalize()
@@ -322,6 +393,7 @@ def _read_cache(ticker: str, directory: Path) -> PriceHistory | None:
         str(meta.get("source") or YAHOO_SOURCE),
         fetched_at=fetched_at,
         from_cache=True,
+        stale=expired,
     )
 
 
@@ -432,8 +504,10 @@ def _validate(df: pd.DataFrame) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    apple, spy = load_offline_histories()
-    print(apple.ticker, apple.source)
-    print(f"  rows {len(apple.frame)}  {apple.frame.index.min().date()} -> {apple.latest_bar.date()}")
-    print(spy.ticker, spy.source)
-    print(f"  rows {len(spy.frame)}  {spy.frame.index.min().date()} -> {spy.latest_bar.date()}")
+    for bundled in offline_symbols():
+        history = load_offline_history(bundled)
+        print(history.ticker, history.source)
+        print(
+            f"  rows {len(history.frame)}  "
+            f"{history.frame.index.min().date()} -> {history.latest_bar.date()}"
+        )
