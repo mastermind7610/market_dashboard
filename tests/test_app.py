@@ -86,8 +86,11 @@ class OfflinePageTests(unittest.TestCase):
             ma_short="20",
             ma_long="100",
             rf="2",
+            tab="Price",
+            chart="Candlestick",
         )
         self.assertEqual(list(page.exception), [])
+        self.assertEqual(page.button_group(key="chart").value, "Candlestick")
         self.assertEqual(page.title[0].value, "AAPL, MSFT vs QQQ")
         self.assertEqual(page.sidebar.multiselect(key="symbols").value, ["AAPL", "MSFT"])
         self.assertEqual(page.sidebar.selectbox(key="benchmark").value, "QQQ")
@@ -125,7 +128,7 @@ class OfflinePageTests(unittest.TestCase):
         # The copyable link carries every setting that is not a default.
         link = page.code[0].value
         for part in ("data=Offline", "symbols=AAPL&symbols=MSFT", "benchmark=QQQ", "range=Max",
-                     "focus=MSFT", "ma_short=20", "ma_long=100", "rf=2"):
+                     "focus=MSFT", "ma_short=20", "ma_long=100", "rf=2", "tab=Price", "chart=Candlestick"):
             self.assertIn(part, link)
 
     def test_the_default_view_has_an_empty_link(self) -> None:

@@ -257,7 +257,7 @@ app.py           the page
 - Rolling beta and correlation need 63 shared daily returns of history before the first point.
 - Five symbols at most, equal standing. No portfolio weights, no trades, no options, no fundamentals.
 - Offline AAPL is the 2017-vintage plotly file. The other three offline files were saved from Yahoo on 22 Nov 2026, so AAPL was not adjusted on the same day as its benchmark. The offline sample ends in Feb 2017.
-- With `range=Custom` left on the dates the page proposes, the address bar omits `start` and `end`, so that address would move with the calendar. **Link to this view** always writes the two dates out. That box does not carry `tab` or `chart`; the address bar does.
+- With `range=Custom` left on the dates the page proposes, the address bar omits `start` and `end`, so that address would move with the calendar. **Link to this view** always writes the two dates out, so use that box for a custom range.
 - The cache is a local `.cache/` directory, ignored by git, reused for 12 hours.
 - Symbol search returns equities and ETFs. A blank or a symbol with spaces or punctuation is rejected before any download.
 

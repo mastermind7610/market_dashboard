@@ -549,6 +549,10 @@ def _share_query(request: dict) -> str:
         pairs.append(("ma_long", str(request["ma_long"])))
     if request["risk_free"] != DEFAULT_RISK_FREE:
         pairs.append(("rf", f"{request['risk_free'] * PERCENT:g}"))
+    if request.get("tab", TABS[0]) != TABS[0]:
+        pairs.append(("tab", request["tab"]))
+    if request.get("chart", LINE) != LINE:
+        pairs.append(("chart", request["chart"]))
     return urlencode(pairs)
 
 
@@ -558,7 +562,7 @@ def _share_link(request: dict) -> str:
     if not address:
         return f"?{query}" if query else "(default view)"
     parts = urlsplit(address)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query, ""))
 
 
 def _take_away(briefing, request: dict) -> None:
@@ -574,8 +578,8 @@ def _take_away(briefing, request: dict) -> None:
         with st.expander("Link to this view"):
             st.code(_share_link(request), language=None)
             st.caption(
-                "The address bar updates as you change symbols, benchmark, range, focus and settings, and it "
-                "also remembers the open chart tab. Opening the link loads the same view with the prices "
+                "The address bar updates the same way as you change symbols, benchmark, range, focus, "
+                "settings and the open chart tab. Opening the link loads the same view with the prices "
                 "available at that time."
             )
 
@@ -706,6 +710,8 @@ def main() -> None:
     _table(briefing)
     _charts(briefing)
     _summary(briefing)
+    request["tab"] = st.session_state.get("tab") or TABS[0]
+    request["chart"] = st.session_state.get("chart") or LINE
     _take_away(briefing, request)
 
 
