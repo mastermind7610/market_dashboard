@@ -11,3 +11,8 @@ font = "sans serif"
 
 [client]
 toolbarMode = "minimal"
+
+[global]
+# Callbacks tidy typed tickers through session state. The widgets also
+# carry defaults so a shared link can omit them.
+disableWidgetStateDuplicationWarning = true
