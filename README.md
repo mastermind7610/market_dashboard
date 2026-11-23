@@ -317,6 +317,7 @@ GitHub Actions (`.github/workflows/tests.yml`) runs three free jobs on every `ma
 - `tests/test_advanced_quant.py`: drawdown recovery/underwater, parametric VaR, CVaR, Jensen alpha, diversification, cost-aware backtest, rolling Sharpe, look-ahead guards (rebalance-day prior weights; no forward fill).
 - `tests/test_analyst.py`: typed AnalystFacts, rule-based claim traceability (including portfolio-window SPY vs SPY own-row), not-financial-advice, optional LLM off-by-default.
 - `tests/test_architecture.py`: layer import boundaries, cost/LLM input validation, cache/retry constants.
+- `tests/test_production_readiness.py`: formula spot-checks, Yahoo timeouts, stale refresh, gap drops, share-link weights/cost, build stamp.
 - `tests/test_app.py`: Streamlit `AppTest` cards (15 metrics including parametric VaR, CVaR, alpha, recovery days), portfolio mode, CSV, search, share links, AI analyst panels.
 
 ## Layout
@@ -328,7 +329,9 @@ plots.py         Plotly charts (including correlation heatmap and rolling Sharpe
 dashboard.py     one briefing, command line, Markdown and CSV export
 analyst.py       typed facts + rule-based (default) / optional LLM interpretation
 app.py           the page
+version_info.py  build / git SHA stamp for the footer
 docs/METHODOLOGY.md  formulas, look-ahead rules, assumptions, data quality
+docs/PRODUCTION_READINESS.md  Phase 6 audit, fixes, remaining limits
 ```
 
 `plots.py` does not read files. `features.py` does not draw. `dashboard.py` is the only place the pieces are assembled. `analyst.py` only reads computed reports (never CSV or Plotly). `app.py` only collects inputs and displays that result.
@@ -351,7 +354,8 @@ docs/METHODOLOGY.md  formulas, look-ahead rules, assumptions, data quality
 - Symbol search returns equities and ETFs. A blank or a symbol with spaces or punctuation is rejected before any download.
 - Portfolio rebalance query params bind after Portfolio mode is on; a shared link that only sets `rebalance` without `portfolio=True` leaves rebalance at none until the checkbox is enabled.
 - Narrow screens tighten padding and metric type; the comparison table scrolls horizontally below 900px. Streamlit's own sidebar drawer still owns the phone layout.
-- This round does not change Streamlit Community Cloud hosting settings; redeploy the branch you choose after merge.
+- Live Yahoo downloads time out after 30 seconds per attempt (search/snapshot 15s) so a hung socket cannot freeze the page.
+- Production-readiness findings and remaining limits: [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
 
 ## Publish on Streamlit Community Cloud
 
@@ -359,8 +363,12 @@ No secret is required. The deployed app does need outbound HTTPS to Yahoo Financ
 
 1. Open [share.streamlit.io](https://share.streamlit.io) and sign in with the GitHub account that owns `mastermind7610/market_dashboard`.
 2. Choose **Create app**, then **Yup, I have an app**.
-3. Repository `mastermind7610/market_dashboard`, branch `main` after this pull request is merged (or branch `cursor/portfolio-and-fundamentals-5ee9` to preview), main file path `app.py`.
+3. Repository `mastermind7610/market_dashboard`, branch **`main`**, main file path `app.py`.
 4. Under **Advanced settings**, select **Python 3.12**. Leave secrets empty.
 5. Deploy. Community Cloud installs `requirements.txt` and runs `streamlit run app.py`.
 
-The public URL is the subdomain chosen in that form, of the shape `https://<name>.streamlit.app`. A push to the deployed branch redeploys the app.
+The public URL is of the shape `https://<name>.streamlit.app`. A push to `main` *usually* redeploys, but **not always**. After every merge:
+
+1. Open the live app and check the footer **Build v… · &lt;sha&gt;**.
+2. If the SHA is behind `origin/main`, open the Streamlit Cloud dashboard for the app and **Reboot** (or Redeploy) so it pulls the new commit.
+3. Smoke: Offline demo → Max → Portfolio AAPL+MSFT → Narrative analyst; then Live AAPL vs SPY for 1Y.

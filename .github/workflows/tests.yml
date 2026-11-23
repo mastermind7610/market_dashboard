@@ -54,4 +54,4 @@ jobs:
       - name: Dependency audit
         run: pip-audit -r requirements.txt
       - name: Bandit (app modules)
-        run: bandit -c pyproject.toml -r analyst.py app.py dashboard.py data_loader.py features.py plots.py
+        run: bandit -c pyproject.toml -r analyst.py app.py dashboard.py data_loader.py features.py plots.py version_info.py

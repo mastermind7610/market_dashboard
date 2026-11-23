@@ -95,7 +95,8 @@ The Narrative section shows a **Computed facts** table built only from `PeriodRe
 
 ## Limitations and data quality
 
-- Yahoo Finance is best-effort and unauthenticated. Empty answers are not cached; cold starts may retry then fall back to a 12-hour disk cache when present.
+- Yahoo Finance is best-effort and unauthenticated. Empty answers are not cached; each attempt times out (30s download / 15s search & snapshot); cold starts may retry then fall back to a 12-hour disk cache when present (failed refresh marks that cache stale even inside the TTL).
+- Rows with missing OHLC/volume/adj_close inside one symbol are dropped, not forward-filled. Shared calendars across symbols remain an inner join with no fill.
 - Streamlit Community Cloud wipes local disk on restart, so the cache only covers symbols loaded since the last restart.
 - Daily (not monthly) returns mean Sharpe/Sortino/beta/capture will not match Portfolio Visualizer or fund fact sheets for the same window.
 - Historical and parametric VaR assume the sample window is representative; Gaussian VaR understates fat tails.

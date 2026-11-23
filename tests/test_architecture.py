@@ -17,7 +17,12 @@ import unittest
 from pathlib import Path
 
 from dashboard import run_briefing
-from data_loader import CACHE_TTL_HOURS, DOWNLOAD_ATTEMPTS, DOWNLOAD_RETRY_DELAYS_SECONDS
+from data_loader import (
+    CACHE_TTL_HOURS,
+    DOWNLOAD_ATTEMPTS,
+    DOWNLOAD_RETRY_DELAYS_SECONDS,
+    DOWNLOAD_TIMEOUT_SECONDS,
+)
 from features import AnalysisError, validate_cost_bps
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +114,7 @@ class CacheAndRetryContractTests(unittest.TestCase):
         self.assertEqual(DOWNLOAD_ATTEMPTS, 3)
         self.assertEqual(len(DOWNLOAD_RETRY_DELAYS_SECONDS), DOWNLOAD_ATTEMPTS - 1)
         self.assertEqual(CACHE_TTL_HOURS, 12)
+        self.assertGreaterEqual(DOWNLOAD_TIMEOUT_SECONDS, 10)
         self.assertTrue(all(delay > 0 for delay in DOWNLOAD_RETRY_DELAYS_SECONDS))
 
 

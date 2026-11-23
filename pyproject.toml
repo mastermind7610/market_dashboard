@@ -1,6 +1,6 @@
 [project]
 name = "market-dashboard"
-version = "0.5.0"
+version = "0.6.0"
 description = "Streamlit market briefing: returns, risk, portfolio, optional AI analyst"
 requires-python = ">=3.12"
 readme = "README.md"
@@ -28,7 +28,7 @@ pretty = true
 # Gradual typing: core modules first. features.py is large and still catching
 # up; follow imports silently so dashboard/analyst stay checkable.
 follow_imports = "silent"
-files = ["analyst.py", "data_loader.py", "plots.py", "dashboard.py"]
+files = ["analyst.py", "data_loader.py", "plots.py", "dashboard.py", "version_info.py"]
 exclude = ["(?x)(^tests/)"]
 
 [[tool.mypy.overrides]]
