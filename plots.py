@@ -1,13 +1,13 @@
 """
-plots.py — THE PLOT LAYER  (Step 3b: with polish)
-================================================================
-Same 2x2 dashboard as before, plus three pieces of polish:
-    - colorbar on the scatter
-    - custom size legend (matplotlib won't auto-build one)
-    - event annotations on the price chart
+plots.py — THE PLOT LAYER
+=========================
+2x2 dashboard panels:
+    - price (with event annotations)
+    - drawdown from peak
+    - rolling annualized volatility
+    - return vs volatility scatter (color = momentum, size = |return|)
 
-TODOs 1-4 are PRE-FILLED with your working code from Step 3a.
-TODOs 5-8 are the new learning blanks for this step.
+Polish: colorbar, custom size legend, event annotations.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ FIGSIZE = (14, 9)
 PRICE_COLOR = "steelblue"
 RETURN_COLOR = "gray"
 VOL_COLOR = "darkorange"
+DRAWDOWN_COLOR = "firebrick"
 SCATTER_CMAP = "RdYlGn"
 
 
@@ -38,13 +39,35 @@ def plot_price(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.plot(df.index, df["close"], color=PRICE_COLOR, linewidth=1.5)
 
 
-# ---- Plot 2: Daily returns (TODO #2 filled) --------------------------------
+# ---- Plot 2: Daily returns (kept for self-tests / reuse) -------------------
 def plot_returns(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.set_title("Daily Log Returns", fontweight="bold")
     ax.set_ylabel("log return")
     ax.grid(True, alpha=0.3)
     ax.plot(df.index, df["log_return"], color=RETURN_COLOR, linewidth=0.8)
     ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.5)
+
+
+# ---- Plot 2b: Drawdown from peak ------------------------------------------
+def plot_drawdown(ax: plt.Axes, df: pd.DataFrame) -> None:
+    """
+    Peak-to-trough loss over time. Filled area makes depth of underwater
+    periods obvious at a glance — complementary to volatility (noise) vs
+    drawdown (how far below the high-water mark).
+    """
+    ax.set_title("Drawdown from Peak", fontweight="bold")
+    ax.set_ylabel("drawdown")
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.5)
+    ax.fill_between(
+        df.index,
+        df["drawdown"],
+        0,
+        color=DRAWDOWN_COLOR,
+        alpha=0.35,
+        linewidth=0,
+    )
+    ax.plot(df.index, df["drawdown"], color=DRAWDOWN_COLOR, linewidth=1.0)
 
 
 # ---- Plot 3: Volatility (TODO #3 filled) -----------------------------------
@@ -217,7 +240,10 @@ def build_dashboard(df: pd.DataFrame) -> plt.Figure:
     """
     fig, axes = setup_figure()
     plot_price(axes[0, 0], df)
-    plot_returns(axes[0, 1], df)
+    # Drawdown replaces raw returns in the grid: daily log returns remain
+    # visible as the scatter y-axis, while this panel answers "how deep
+    # below the peak am I?"
+    plot_drawdown(axes[0, 1], df)
     plot_volatility(axes[1, 0], df)
     sc = plot_scatter(axes[1, 1], df)
 
