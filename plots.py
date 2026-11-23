@@ -456,6 +456,53 @@ def _add_line(
     )
 
 
+
+def correlation_heatmap(matrix) -> go.Figure | None:
+    """Pairwise return correlations for the selected symbols."""
+    if matrix is None or getattr(matrix, "empty", True):
+        return None
+    if matrix.shape[0] < 2:
+        return None
+    figure = _figure("Correlation of daily returns")
+    z = matrix.to_numpy(dtype=float)
+    labels = [str(name) for name in matrix.columns]
+    figure.add_trace(
+        go.Heatmap(
+            z=z,
+            x=labels,
+            y=labels,
+            colorscale=HEATMAP_SCALE,
+            zmid=0.0,
+            zmin=-1.0,
+            zmax=1.0,
+            colorbar=dict(title="ρ"),
+            hovertemplate="%{y} vs %{x}: %{z:.2f}<extra></extra>",
+        )
+    )
+    figure.update_layout(yaxis_autorange="reversed", height=max(320, 80 + 40 * len(labels)))
+    return figure
+
+
+def rolling_risk_adjusted_chart(
+    rolling_sharpe,
+    rolling_sortino,
+    *,
+    ticker: str,
+    window: int,
+) -> go.Figure | None:
+    """Trailing Sharpe and Sortino on one axis."""
+    if rolling_sharpe is None and rolling_sortino is None:
+        return None
+    figure = _figure(f"{ticker} rolling {window}-day Sharpe and Sortino")
+    if rolling_sharpe is not None and not rolling_sharpe.dropna().empty:
+        _add_line(figure, rolling_sharpe, "Sharpe", COLOR_PRICE, width=2.0, hover="Sharpe")
+    if rolling_sortino is not None and not rolling_sortino.dropna().empty:
+        _add_line(figure, rolling_sortino, "Sortino", COLOR_MA_SHORT, width=1.8, hover="Sortino")
+    figure.add_hline(y=0.0, line_color=COLOR_REFERENCE, line_width=1, line_dash="dot")
+    figure.update_layout(yaxis_title="Annualized ratio")
+    return figure
+
+
 if __name__ == "__main__":
     # A drawn-by-hand series is enough to prove every chart builds. Real
     # prices arrive through dashboard.py, which is the only orchestrator.

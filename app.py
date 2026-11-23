@@ -42,6 +42,9 @@ from data_loader import (
 # (not the unrelated PyPI package of the same name).
 from features import (
     DEFAULT_RISK_FREE,
+    DEFAULT_COST_BPS,
+    COST_BPS_MAX,
+    COST_BPS_MIN,
     MA_LONG,
     MA_SHORT,
     MAX_MA_WINDOW,
@@ -504,7 +507,7 @@ def _portfolio_controls(symbols: list[str]) -> dict:
     if not enabled or len(usable) < 2:
         if enabled and len(usable) < 2:
             st.sidebar.caption("Add at least two symbols to build a portfolio.")
-        return {"portfolio": False, "weights": None, "rebalance": REBALANCE_NONE}
+        return {"portfolio": False, "weights": None, "rebalance": REBALANCE_NONE, "cost_bps": DEFAULT_COST_BPS}
 
     labels = {
         REBALANCE_NONE: "None (buy and hold)",
@@ -534,7 +537,17 @@ def _portfolio_controls(symbols: list[str]) -> dict:
             help="Zero leaves this symbol out of the mix. Weights are scaled to 100% if they do not already sum to it.",
         )
         weights[symbol] = float(percent) / PERCENT
-    return {"portfolio": True, "weights": weights, "rebalance": rebalance}
+    cost = st.sidebar.number_input(
+        "Transaction cost (bps)",
+        min_value=float(COST_BPS_MIN),
+        max_value=float(COST_BPS_MAX),
+        value=float(DEFAULT_COST_BPS),
+        step=1.0,
+        key="cost_bps",
+        bind=BOUND,
+        help="Charged on turnover at inception and at each rebalance. 10 bps = 0.10% of traded notional.",
+    )
+    return {"portfolio": True, "weights": weights, "rebalance": rebalance, "cost_bps": float(cost)}
 
 
 def _sidebar() -> dict:
@@ -719,8 +732,17 @@ def _metrics(stats) -> None:
     bottom[1].metric("Sortino ratio", _number(stats.sortino, "{:.2f}"), help=help_text["sortino"])
     bottom[2].metric(f"Beta vs {bench}", _number(stats.beta, "{:.2f}"), help=help_text["beta"])
     bottom[3].metric(f"Correlation vs {bench}", _number(stats.correlation, "{:.2f}"), help=help_text["correlation"])
-    bottom[4].metric("95% hist. VaR", _number(stats.value_at_risk_95, "{:.1%}"), help=help_text["value_at_risk_95"])
-    st.caption(f"Volatility label: **{label}**. {volatility_rule_text()}")
+    bottom[4].metric("95% hist. VaR", _number(stats.value_at_risk_95, "{:.1%}"), help=help_text.get("value_at_risk_95", ""))
+    extra = st.columns(5)
+    extra[0].metric("95% param. VaR", _number(stats.parametric_var_95, "{:.1%}"))
+    extra[1].metric("95% CVaR / ES", _number(stats.cvar_95, "{:.1%}"))
+    extra[2].metric(f"Alpha vs {bench}", _number(stats.alpha, "{:+.1%}"))
+    extra[3].metric("Peak→trough (days)", "—" if stats.drawdown_days_to_trough is None else str(stats.drawdown_days_to_trough))
+    extra[4].metric("Trough→recovery", "—" if stats.drawdown_days_to_recovery is None else str(stats.drawdown_days_to_recovery))
+    st.caption(
+        f"Volatility label: **{label}**. {volatility_rule_text()} "
+        f"Longest underwater: {stats.longest_underwater_days if stats.longest_underwater_days is not None else '—'} sessions."
+    )
 
 
 def _card(sentences) -> None:
@@ -800,6 +822,34 @@ def _calendar_years(briefing) -> None:
         st.caption(sentence)
 
 
+def _cost_and_diversification(briefing) -> None:
+    """Portfolio trading costs and diversification stats when available."""
+    cost = briefing.cost_report
+    divers = briefing.comparison.diversification
+    if cost is None and divers is None:
+        return
+    st.subheader("Portfolio construction details")
+    cols = st.columns(4)
+    if cost is not None:
+        cols[0].metric("Cost setting (bps)", f"{cost.cost_bps:g}")
+        cols[1].metric("Total turnover", f"{cost.total_turnover:.2f}")
+        cols[2].metric("Fee drag (sum)", f"{cost.total_cost_drag:.2%}")
+        cols[3].metric("Resets (incl. open)", str(cost.rebalance_count))
+        st.caption(
+            "Turnover is half the L1 weight distance at each reset; inception counts as 1.0. "
+            "Fee drag is the sum of turnover × bps on traded notional."
+        )
+    if divers is not None:
+        dcols = st.columns(3)
+        ratio = "—" if divers.diversification_ratio is None else f"{divers.diversification_ratio:.2f}"
+        dcols[0].metric("Diversification ratio", ratio)
+        dcols[1].metric("Effective N", f"{divers.effective_n:.2f}")
+        ranked = sorted(divers.risk_contribution.items(), key=lambda item: -item[1])
+        listing = ", ".join(f"{name} {share:.0%}" for name, share in ranked)
+        dcols[2].metric("Top risk contribution", ranked[0][0] if ranked else "—")
+        st.caption(f"Risk contribution by weight: {listing}.")
+
+
 def _summary(briefing) -> None:
     stats = briefing.report.stats
     st.subheader(f"What the numbers say about {briefing.focus}")
@@ -813,6 +863,7 @@ def _summary(briefing) -> None:
     with st.expander("How every figure and label is defined"):
         for note in methodology_notes(stats.ma_short_window, stats.ma_long_window):
             st.markdown(f"- {note}")
+        st.markdown("Full formulas and limitations: see `docs/METHODOLOGY.md` in the repository.")
 
 
 def _table(briefing) -> None:
@@ -975,6 +1026,12 @@ def _charts(briefing) -> None:
             f"Beta and correlation over the trailing {ROLLING_BETA_WINDOW} shared daily returns. "
             "A beta near 1 moves like the benchmark. A correlation near 0 moves independently of it."
         )
+        _show(figures.get("rolling_ratios"), "Rolling Sharpe/Sortino need a longer history.")
+        st.caption(
+            f"Trailing {ROLLING_BETA_WINDOW}-day annualized Sharpe and Sortino for the symbol in focus."
+        )
+        _show(figures.get("correlation"), "A correlation heatmap needs at least two symbols with shared returns.")
+        st.caption("Pairwise Pearson correlations of daily simple returns across the selected symbols.")
     with returns_tab:
         _show(figures["histogram"], "No daily returns to draw.")
         st.caption(
@@ -1011,6 +1068,7 @@ def _brief(request: dict):
             weights=request.get("weights"),
             rebalance=request.get("rebalance") or REBALANCE_NONE,
             portfolio=bool(request.get("portfolio")),
+            cost_bps=float(request.get("cost_bps") or DEFAULT_COST_BPS),
         )
 
 
@@ -1069,6 +1127,7 @@ def main() -> None:
     _snapshot(briefing)
     _metrics(briefing.report.stats)
     _table(briefing)
+    _cost_and_diversification(briefing)
     _charts(briefing)
     _calendar_years(briefing)
     _summary(briefing)

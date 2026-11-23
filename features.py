@@ -296,8 +296,12 @@ def methodology_notes(ma_short: int = MA_SHORT, ma_long: int = MA_LONG) -> tuple
         f"least {MIN_RETURNS_FOR_RATIOS} daily returns.",
         "Maximum drawdown is the deepest decline from a prior peak to a later "
         "close inside the window. The peak is the highest adjusted close on "
-        "or before the trough. A window that never closes below a prior peak "
-        "has a drawdown of zero.",
+        "or before the trough. Days to trough count trading sessions from that "
+        "peak to the trough; days to recovery count from the trough to the first "
+        "later close at or above the peak price (omitted when unrecovered). "
+        "Longest underwater is the longest run of sessions with price below the "
+        "running peak. A window that never closes below a prior peak has a "
+        "drawdown of zero.",
         "Best day and worst day are the largest and smallest daily simple "
         "returns inside the window. The share of gains is the fraction of "
         "daily returns above zero.",
@@ -334,6 +338,32 @@ def methodology_notes(ma_short: int = MA_SHORT, ma_long: int = MA_LONG) -> tuple
         "percentile of daily simple returns in the window. It needs at least "
         f"{MIN_RETURNS_FOR_VAR} daily returns. A VaR of 2% means that on "
         f"{VAR_CONFIDENCE:.0%} of days the return was better than −2%.",
+        f"95% parametric (Gaussian) VaR uses the sample mean μ and sample "
+        f"standard deviation σ of daily simple returns: −(μ + z σ), floored at "
+        f"zero, where z is the standard normal inverse CDF at "
+        f"{1.0 - VAR_CONFIDENCE:.0%}. Same minimum return count as historical VaR.",
+        f"95% Conditional VaR (expected shortfall) is minus the mean of daily "
+        f"simple returns at or below the historical VaR quantile. It answers "
+        f"how bad the average loss was on the worst "
+        f"{1.0 - VAR_CONFIDENCE:.0%} of days.",
+        "Jensen's alpha is annualised as daily_alpha × "
+        f"{TRADING_DAYS}. Daily alpha is the average stock excess return minus "
+        "beta times the average benchmark excess return, using the same daily "
+        "risk-free rate as Sharpe. It needs the same shared-return count as beta.",
+        f"Rolling Sharpe and Sortino use the trailing {ROLLING_SHARPE_WINDOW} "
+        "daily simple returns of the focus symbol, annualised the same way as "
+        "the full-window ratios.",
+        "The correlation heatmap is the Pearson correlation matrix of daily "
+        "simple returns across the selected symbols on shared sessions.",
+        "Diversification ratio is the weighted average of standalone "
+        "volatilities divided by portfolio volatility (both from the sample "
+        "covariance of daily returns). Effective number of holdings is 1 / Σ w_i². "
+        "Risk contribution for holding i is its share of portfolio variance: "
+        "w_i (Σw)_i / σ_p².",
+        "Transaction cost is charged in basis points of turnover at inception "
+        "and at each rebalance. Turnover for a reset is half the L1 distance "
+        "between pre-trade weights and the target. Portfolio value is scaled by "
+        "(1 − turnover × bps / 10_000). Buy-and-hold charges only the opening trade.",
         "Calendar-year returns chain inside each year of the window: the last "
         "close of that year (or the window end) over the first close of that "
         "year (or the window start for a partial first year), minus one.",
@@ -1225,6 +1255,12 @@ def portfolio_backtest(
     inception). Turnover for a reset is half the L1 distance between the
     pre-trade weights and the target weights. Cost drag compounds as
     value *= (1 − turnover × bps / 10000).
+
+    Look-ahead rule: holdings for day ``t`` are set at ``t-1`` (or at the
+    prior rebalance). The return from ``t-1`` to ``t`` always uses those
+    pre-trade weights. A period change on day ``t`` resets weights after
+    that mark, so the new mix first earns the move from ``t`` to ``t+1``.
+    Shared dates are an inner join with no forward fill.
     """
     mode = validate_rebalance(rebalance)
     bps = validate_cost_bps(cost_bps)
@@ -1244,6 +1280,7 @@ def portfolio_backtest(
     levels = frame.to_numpy(dtype=float)
     value = np.empty(len(frame), dtype=float)
     # Open at target weights; charge inception turnover of 1.0 (fully invested).
+    # Opening weights are known before the first bar (no look-ahead).
     open_turnover = 1.0
     open_cost = open_turnover * cost_rate
     holdings = target * (1.0 - open_cost) / levels[0]
@@ -1253,29 +1290,26 @@ def portfolio_backtest(
     rebalance_count = 1  # inception counts as the opening trade
 
     for i in range(1, len(frame)):
+        # Mark to market with holdings fixed at t-1. Day-t return uses only
+        # pre-rebalance weights, so tomorrow's target never earns today's move.
         pre_value = float(np.dot(holdings, levels[i]))
+        value[i] = pre_value
+        # Calendar period change is known from the date itself. Execute the
+        # reset after today's mark, at today's close — weights for day i+1.
         if mode != REBALANCE_NONE and periods[i] != periods[i - 1]:
-            # Weights before the reset, from mark-to-market holdings.
             if pre_value > _EPSILON:
                 current = holdings * levels[i] / pre_value
             else:
                 current = target.copy()
             turnover = 0.5 * float(np.sum(np.abs(target - current)))
             fee = turnover * cost_rate
-            # Zero-cost path keeps the historical rebalance value (value[i-1])
-            # so existing figures stay stable. With costs, mark to market first.
-            base = value[i - 1] if cost_rate <= _EPSILON else pre_value
-            post = base * (1.0 - fee)
+            post = pre_value * (1.0 - fee)
             holdings = target * post / levels[i]
             value[i] = post
             turnovers.append(turnover)
             rebalance_count += 1
-        else:
-            value[i] = pre_value
     total_turnover = float(sum(turnovers))
-    total_cost = float(1.0 - np.prod([1.0 - t * cost_rate for t in turnovers]))
-    # Prefer the compounded drag implied by the path start: 1 - final_without would
-    # need a twin path; report sum of fee fractions on traded notionals instead.
+    # Fee drag is the sum of turnover × bps on traded notional (not a path twin).
     fee_sum = float(sum(t * cost_rate for t in turnovers))
     report = PortfolioCostReport(
         cost_bps=bps,

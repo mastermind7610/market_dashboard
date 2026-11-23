@@ -38,6 +38,7 @@ from features import (
     MA_LONG,
     MA_SHORT,
     PORTFOLIO_LABEL,
+    PortfolioCostReport,
     PRESETS,
     REBALANCE_NONE,
     REBALANCE_OPTIONS,
@@ -48,6 +49,8 @@ from features import (
     Comparison,
     PeriodReport,
     aligned_export,
+    portfolio_backtest,
+    DEFAULT_COST_BPS,
     build_comparison,
     build_period,
     comparison_table,
@@ -74,6 +77,8 @@ from plots import (
     return_histogram,
     rolling_relationship_chart,
     volatility_chart,
+    correlation_heatmap,
+    rolling_risk_adjusted_chart,
 )
 
 
@@ -111,6 +116,8 @@ class Briefing:
     rebalance: str = REBALANCE_NONE
     snapshot: CompanySnapshot | None = None
     export_csv: str | None = None
+    cost_bps: float = DEFAULT_COST_BPS
+    cost_report: PortfolioCostReport | None = None
 
     @property
     def stock(self) -> PriceHistory:
@@ -149,6 +156,7 @@ def run_briefing(
     weights: dict[str, float] | None = None,
     rebalance: str = REBALANCE_NONE,
     portfolio: bool = False,
+    cost_bps: float = DEFAULT_COST_BPS,
 ) -> Briefing:
     """
     One briefing. Pass ``tickers`` for several symbols, or ``ticker``
@@ -195,9 +203,10 @@ def run_briefing(
     portfolio_report = None
     weight_map = None
     portfolio_notes: tuple[str, ...] = ()
+    cost_report = None
     # A portfolio needs two or more loaded symbols so the mix has something to mix.
     if portfolio and len(reports) >= 2:
-        portfolio_report, weight_map, portfolio_notes = _build_portfolio(
+        portfolio_report, weight_map, portfolio_notes, cost_report = _build_portfolio(
             reports,
             benchmark_report=benchmark_report,
             bench_history=bench_history,
@@ -208,12 +217,13 @@ def run_briefing(
             ma_short=ma_short,
             ma_long=ma_long,
             risk_free=risk_free,
+            cost_bps=cost_bps,
         )
         notes = notes + portfolio_notes
     elif portfolio and len(reports) < 2:
         notes = notes + ("Portfolio mode needs at least two loaded symbols.",)
 
-    comparison = build_comparison(reports, benchmark_report, portfolio_report)
+    comparison = build_comparison(reports, benchmark_report, portfolio_report, weights=weight_map)
     figures = _build_figures(reports[chosen], benchmark_report, comparison)
     snapshot = _load_snapshot(chosen, offline=offline)
     export_csv = aligned_export(
@@ -250,6 +260,8 @@ def run_briefing(
         rebalance=rebalance_mode,
         snapshot=snapshot,
         export_csv=export_csv,
+        cost_bps=cost_bps,
+        cost_report=cost_report,
     )
 
 
@@ -377,12 +389,15 @@ def _build_portfolio(
     ma_short: int,
     ma_long: int,
     risk_free: float,
-) -> tuple[PeriodReport, dict[str, float], tuple[str, ...]]:
+    cost_bps: float = DEFAULT_COST_BPS,
+) -> tuple[PeriodReport, dict[str, float], tuple[str, ...], object]:
     """Build a portfolio report on shared sessions of the loaded symbols."""
     weight_map, notes = normalize_weights(weights, list(reports))
     series = {symbol: reports[symbol].charts.price for symbol in weight_map}
     shared = shared_sessions(series)
-    value = portfolio_value(shared, weight_map, rebalance=rebalance)
+    value, cost_report = portfolio_backtest(
+        shared, weight_map, rebalance=rebalance, cost_bps=cost_bps
+    )
     bench_frame = None if bench_history is None else bench_history.frame
     bench_ticker = None if benchmark_report is None else benchmark_report.stats.ticker
     report = build_period(
@@ -403,7 +418,14 @@ def _build_portfolio(
         if rebalance == "quarterly"
         else "Portfolio is buy-and-hold after the opening weights."
     )
-    return report, weight_map, notes + (mode_note,)
+    if cost_bps > 0:
+        notes = notes + (
+            f"Transaction cost {cost_bps:g} bps per unit of turnover; "
+            f"total turnover {cost_report.total_turnover:.2f} across "
+            f"{cost_report.rebalance_count} resets; cumulative fee drag "
+            f"{cost_report.total_cost_drag:.2%} of notional.",
+        )
+    return report, weight_map, notes + (mode_note,), cost_report
 
 
 def _load_snapshot(symbol: str, *, offline: bool) -> CompanySnapshot | None:
@@ -595,6 +617,13 @@ def _build_figures(
             benchmark=bench_name,
         ),
         "heatmap": monthly_heatmap(monthly_table(charts.monthly), ticker=stats.ticker),
+        "correlation": correlation_heatmap(comparison.correlation_matrix),
+        "rolling_ratios": rolling_risk_adjusted_chart(
+            charts.rolling_sharpe,
+            charts.rolling_sortino,
+            ticker=stats.ticker,
+            window=ROLLING_BETA_WINDOW,
+        ),
     }
 
 
@@ -614,6 +643,12 @@ def _result_lines(stats) -> list[str]:
         f"- Sharpe ratio: {_fmt_optional(stats.sharpe, '{:.2f}')}",
         f"- Sortino ratio: {_fmt_optional(stats.sortino, '{:.2f}')}",
         f"- 95% historical VaR: {_fmt_optional(stats.value_at_risk_95)}",
+        f"- 95% parametric VaR: {_fmt_optional(stats.parametric_var_95)}",
+        f"- 95% Conditional VaR: {_fmt_optional(stats.cvar_95)}",
+        f"- Jensen alpha (ann.): {_fmt_optional(stats.alpha)}",
+        f"- Days peak→trough: {stats.drawdown_days_to_trough if stats.drawdown_days_to_trough is not None else '—'}",
+        f"- Days trough→recovery: {stats.drawdown_days_to_recovery if stats.drawdown_days_to_recovery is not None else '—'}",
+        f"- Longest underwater (sessions): {stats.longest_underwater_days if stats.longest_underwater_days is not None else '—'}",
         f"- Maximum drawdown: {_fmt_optional(stats.max_drawdown)}",
         (
             f"- Versus {stats.benchmark}: "
@@ -737,6 +772,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="SYMBOL=FRACTION",
         help="Portfolio weight, e.g. AAPL=0.4. Repeat per symbol. Default is equal weight.",
+    )
+    parser.add_argument(
+        "--cost-bps",
+        type=float,
+        default=DEFAULT_COST_BPS,
+        help="Transaction cost in basis points of turnover at each rebalance.",
     )
     parser.add_argument(
         "--rebalance",
