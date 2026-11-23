@@ -221,32 +221,40 @@ All figures use the adjusted close. The same text is on the page under **How eve
 - **Cumulative return** is the adjusted close on the last session of the window divided by the adjusted close on the first session, minus one.
 - **Annualized return (CAGR)** is one plus the cumulative return, raised to 365.25 divided by the calendar days between the first and last session, minus one. It is withheld when the window spans fewer than 360 calendar days, because compounding a few months into a yearly rate reports a return nobody earned.
 - **Annualized volatility** is the sample standard deviation (divisor N−1) of daily log returns inside the window, multiplied by the square root of 252. At least two daily returns are required.
-- **Maximum drawdown** is the deepest decline from a prior peak to a later close inside the window. A window that never closes below a prior peak has a drawdown of zero.
+- **Maximum drawdown** is the deepest decline from a prior peak to a later close inside the window. **Days to trough** and **days to recovery** count trading sessions peak→trough and trough→first close back at the peak (omitted if unrecovered). **Longest underwater** is the longest run below the running peak.
 - **Best day, worst day** are the largest and smallest daily simple returns in the window. The share of gains is the fraction of daily returns above zero.
 - **Moving averages** are simple averages of adjusted close, 50 and 200 days unless changed. They are computed on the full loaded history and then drawn on the selected dates, so a 200-day average can appear inside a shorter window.
 - **Monthly returns** chain inside the window: each month's last adjusted close over the previous month's last, with the window's first close as the base of the first month. The first and last months can be partial. Compounded, the cells equal the cumulative return.
 - **95% historical Value at Risk** is minus the 5th percentile of daily simple returns inside the window, reported as a positive loss fraction. At least 20 daily returns. A VaR of 2% means that on 95% of days the return was better than −2%.
+- **95% parametric (Gaussian) VaR** is −(μ + z₀.₀₅ σ) with sample mean/std of daily simple returns, floored at zero.
+- **95% Conditional VaR (expected shortfall)** is minus the mean of daily returns at or below the historical VaR quantile.
 - **Calendar-year returns** take the first and last adjusted close inside each calendar year of the window. Partial years are allowed. A year with only one print is skipped.
 
 **Portfolio**
 
 - **Weights** are fractions of the portfolio. Missing weights default to equal weight. Zero-weight symbols are dropped. Negative weights are rejected. Weights that do not sum to 100% are scaled to 100% and named in a note.
-- **Buy and hold** (`none`) keeps the opening share counts after day one. **Monthly** or **quarterly** rebalance resets to the target weights on the first shared session of each new month or quarter.
-- The portfolio is treated like a symbol for return, risk, drawdown, VaR, beta and the comparison chart. It needs at least two loaded symbols.
+- **Buy and hold** (`none`) keeps the opening share counts after day one. **Monthly** or **quarterly** rebalance marks to market with prior weights, then resets to the target at that day's close so the new mix first earns the next session (no look-ahead).
+- **Transaction cost (bps)** is charged on turnover at inception and each rebalance. Turnover is half the L1 weight distance; value scales by (1 − turnover × bps / 10_000).
+- **Diversification ratio** is weighted standalone volatility over portfolio volatility; **effective N** is 1/Σw²; **risk contribution** is each weight's share of portfolio variance. The **correlation heatmap** is pairwise Pearson correlations of daily returns.
+- The portfolio is treated like a symbol for return, risk, drawdown, VaR, beta, alpha and the comparison chart. It needs at least two loaded symbols.
 
 **Return per unit of risk**
 
 - **Sharpe ratio** is the mean daily simple return above the daily risk-free rate, divided by the sample standard deviation of those excess returns, multiplied by the square root of 252. The daily risk-free rate is (1 + annual rate)^(1/252) − 1.
 - **Sortino ratio** has the same numerator. Its denominator is the downside deviation: the square root of the mean squared shortfall below the risk-free rate, where days at or above the rate count as zero and every day is in the divisor.
 - Both need at least 20 daily returns. A window with no day below the rate has no Sortino ratio.
+- **Rolling Sharpe and Sortino** use the trailing 63 daily returns of the focus symbol, annualised the same way.
 
 **Against the benchmark**
 
 - **Benchmark gap.** Dates are an inner join: a session missing on either side is left out, not filled. Each cumulative return runs from the first shared session to the last. The gap is the stock's return minus the benchmark's, in percentage points. It is not a regression alpha.
 - **Beta** is the sample covariance of the stock's and the benchmark's daily simple returns on shared sessions, divided by the benchmark's sample variance. At least 20 shared daily returns.
+- **Jensen's alpha (annualised)** is 252 × (average stock excess return − beta × average benchmark excess return), using the same daily risk-free rate as Sharpe.
 - **Correlation** is the Pearson correlation of the same pairs.
 - **Up capture** is the stock's mean daily return on the days the benchmark rose, divided by the benchmark's mean daily return on those days. **Down capture** is the same on the days it fell. Each side needs at least 10 days. This is a daily arithmetic version, not the monthly compounded figure fund fact sheets print.
 - **Rolling beta and correlation** use the trailing 63 shared daily returns, computed on the full loaded history and then shown on the selected dates.
+
+Full formulas, look-ahead rules, assumptions and data-quality notes: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 
 **Labels**
 
@@ -268,22 +276,24 @@ Live OHLC from Yahoo is fetched with `auto_adjust=True`, so every symbol is adju
 python -m unittest discover -s tests -v
 ```
 
-137 tests.
+Run `python -m unittest discover -s tests -v` for the current count.
 
-- `tests/test_calculations.py` (11): hand-computed returns, the annualized-volatility formula, a known peak-to-trough drawdown (−25% from 120 to 90), moving-average warmup, date alignment without filling gaps, and a jumpy window labelled elevated against a calm history.
-- `tests/test_metrics.py` (45): known answers for annualized return, the daily risk-free rate, Sharpe, downside deviation, Sortino, beta, correlation, up and down capture, best and worst day, rolling beta and correlation, monthly returns and their table, adjusted candles, rebasing and shared sessions, each label cut, and the settings limits. Edge cases: a part-year window, too few returns, a flat series, no losing days, a benchmark that never moved, too few up or down days, windows in the wrong order. One case builds a stock that moves exactly twice the benchmark each day and checks beta 2, correlation 1 and capture 200% through the whole pipeline.
-- `tests/test_pipeline.py` (28): the four bundled files, offline briefings, several symbols against a chosen benchmark, one bad symbol among several, every symbol bad, the benchmark listed as a symbol, more than five symbols, a symbol with no sessions in the range, settings passed through and rejected, the disk cache, an outage served from an expired download and an outage with nothing on disk, download retries that never cache an empty frame, offline selection notices, the command line, and live Yahoo fetches (skipped if Yahoo is unreachable).
-- `tests/test_portfolio_and_risk.py` (31): weight normalization (equal weight, sums ≠ 100%, zeros, negatives), buy-and-hold and monthly rebalance hand paths, historical VaR percentile and edges, calendar-year returns, offline and sparse company snapshots (including dividend-yield percent scaling), CSV export, offline portfolio briefing, and `apple` → AAPL search.
-- `tests/test_app.py` (22): the page itself, driven headless with Streamlit's `AppTest`. The cards match the calculation (including 95% VaR), a link reproduces a multi-symbol view, portfolio mode with snapshot, calendar years, CSV download and a green portfolio row, company-name search wiring, a custom range, a one-day range, changing the range, the focus and the benchmark, averages in the wrong order, offline drop notices, an empty symbol list, In focus listing only symbols that loaded, switching Live→Offline naming dropped tickers, and live mode with the download stubbed.
+- `tests/test_calculations.py`: hand-computed returns, volatility, drawdown, moving averages, date alignment, volatility labels.
+- `tests/test_metrics.py`: Sharpe, Sortino, beta, correlation, capture, rolling metrics, monthly returns, settings limits, pipeline beta=2 case.
+- `tests/test_pipeline.py`: offline/live briefings, cache, outages, CLI, multi-symbol edges.
+- `tests/test_portfolio_and_risk.py`: weights, buy-and-hold and monthly rebalance hand paths (MTM-then-reset), historical VaR, calendar years, snapshots, CSV, search.
+- `tests/test_advanced_quant.py`: drawdown recovery/underwater, parametric VaR, CVaR, Jensen alpha, diversification, cost-aware backtest, rolling Sharpe, look-ahead guards (rebalance-day prior weights; no forward fill).
+- `tests/test_app.py`: Streamlit `AppTest` cards (15 metrics including parametric VaR, CVaR, alpha, recovery days), portfolio mode, CSV, search, share links.
 
 ## Layout
 
 ```
 data_loader.py   prices, search, company snapshot, 12-hour cache, bundled files
-features.py      returns, risk, VaR, calendar years, portfolio, ratios, comparison, sentences
-plots.py         Plotly charts
+features.py      returns, risk, VaR/CVaR, alpha, diversification, portfolio/costs, ratios, sentences
+plots.py         Plotly charts (including correlation heatmap and rolling Sharpe/Sortino)
 dashboard.py     one briefing, command line, Markdown and CSV export
 app.py           the page
+docs/METHODOLOGY.md  formulas, look-ahead rules, assumptions, data quality
 ```
 
 `plots.py` does not read files. `features.py` does not draw. `dashboard.py` is the only place the pieces are assembled. `app.py` only collects inputs and displays that result.
@@ -297,9 +307,9 @@ app.py           the page
 - The volatility label is a rank inside one symbol's own history. A 25% year can be "typical" when older decades were wilder. Read the percentile next to the word.
 - The table gives each symbol its own sessions. A symbol that listed part-way through the range has a shorter row, and its return is not comparable with the others until the range is narrowed to dates they share. The page names the symbol and the date.
 - Rolling beta and correlation need 63 shared daily returns of history before the first point.
-- Five symbols at most. Portfolio mode mixes those that loaded; it is not a trade blotter and does not model costs, taxes or cash.
+- Five symbols at most. Portfolio mode mixes those that loaded; proportional bps costs are modelled, but taxes, cash drag and bid–ask schedules are not.
 - Company facts come from yfinance `info`. Fields Yahoo leaves blank stay blank. Offline snapshots are illustrative placeholders labelled as such, not restated fundamentals for 2015–2017.
-- Historical VaR uses daily simple returns and a single left-tail percentile. It is not parametric VaR and not a forward-looking risk limit.
+- Historical, parametric and Conditional VaR use daily simple returns inside the window. They are not multi-day horizon limits and Gaussian VaR understates fat tails.
 - Offline AAPL is the 2017-vintage plotly file. The other three offline files were saved from Yahoo on 22 Nov 2026, so AAPL was not adjusted on the same day as its benchmark. The offline sample ends in Feb 2017.
 - With `range=Custom` left on the dates the page proposes, the address bar omits `start` and `end`, so that address would move with the calendar. **Link to this view** always writes the two dates out, so use that box for a custom range.
 - The cache is a local `.cache/` directory, ignored by git, reused for 12 hours.

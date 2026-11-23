@@ -126,10 +126,12 @@ class PortfolioValueTests(unittest.TestCase):
         monthly = portfolio_value(frame, weights, rebalance=REBALANCE_MONTHLY)
         self.assertAlmostEqual(float(held.iloc[0]), 1.0)
         self.assertAlmostEqual(float(monthly.iloc[0]), 1.0)
-        # Hand path for monthly: end-Jan value 1.10; rebalance at Feb 3 into
-        # 0.55/120 of A and 0.55/110 of B; end-Feb = 0.55 + 0.65 = 1.20.
+        # Hand path (no look-ahead): end-Jan 1.10; on Feb 3 mark to 1.15 with
+        # prior weights, then reset to 50/50 → 0.575/120 of A and 0.575/110 of B.
+        # End-Feb: 0.575 + 0.575 * 130/110 = 1.254545…
         self.assertAlmostEqual(float(monthly.iloc[2]), 1.10)
-        self.assertAlmostEqual(float(monthly.iloc[-1]), 1.20)
+        self.assertAlmostEqual(float(monthly.iloc[3]), 1.15)
+        self.assertAlmostEqual(float(monthly.iloc[-1]), 0.575 + 0.575 * 130.0 / 110.0)
         # Buy-and-hold keeps 0.005 shares of each: 0.6 + 0.65 = 1.25.
         self.assertAlmostEqual(float(held.iloc[-1]), 1.25)
         self.assertNotAlmostEqual(float(monthly.iloc[-1]), float(held.iloc[-1]))

@@ -23,7 +23,7 @@ from data_loader import MarketDataError, load_prices
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 TIMEOUT_SECONDS = 60
-CARD_COUNT = 10
+CARD_COUNT = 15
 # Height of the header bar Streamlit Community Cloud draws over the page.
 CLOUD_HEADER_REM = 3.75
 
