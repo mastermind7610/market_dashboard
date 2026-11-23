@@ -1,0 +1,18 @@
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1f4b99"
+backgroundColor = "#f3f5f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1c2430"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[global]
+# Callbacks tidy typed tickers through session state. The widgets also
+# carry defaults so a shared link can omit them.
+disableWidgetStateDuplicationWarning = true

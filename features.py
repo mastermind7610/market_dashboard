@@ -1,121 +1,1421 @@
 """
 features.py — THE FEATURE LAYER
 =================================
-Takes the clean OHLCV frame from data_loader and adds the three
-signals our dashboard actually plots:
+Performance and risk for one selected window, a side-by-side comparison
+of several symbols, and the sentences that describe those numbers. Every
+sentence is filled from a field on PeriodStats. This module does not
+fetch data and does not draw charts.
 
-    log_return    -> daily log return of close
-    volatility    -> rolling annualized std of log returns
-    momentum      -> trailing N-day cumulative log return
+Definitions, in one place so the label cannot drift from the prose:
 
-Each is one small function. build_features() wires them together so
-the rest of the system imports one thing and gets a fully enriched
-frame back.
+* Cumulative return is end adjusted close / start adjusted close − 1.
+* Annualized return (CAGR) is (1 + cumulative return) raised to
+  365.25 / calendar days in the window, minus one. It is withheld for
+  windows shorter than 360 calendar days.
+* Annualized volatility is the sample standard deviation (N−1) of daily
+  log returns in the window, times sqrt(252).
+* Sharpe ratio is the mean daily simple return above the daily risk-free
+  rate, divided by the sample standard deviation of those excess
+  returns, times sqrt(252).
+* Sortino ratio has the same numerator. The denominator is the downside
+  deviation: the root mean square of the below-rate days, with every
+  day in the divisor.
+* Maximum drawdown is the lowest close-to-prior-peak decline inside the
+  window. The peak is the highest adjusted close on or before the trough.
+* Moving averages are simple averages of adjusted close. They are built
+  on the full loaded history, then shown on the selected dates, so a
+  200-day average can appear inside a shorter window.
+* The volatility label ranks the window's annualized volatility against
+  this symbol's own rolling 21-day annualized volatilities on the full
+  loaded history. Quiet is a percentile rank of 20 or below. Elevated is
+  80 or above. Between them is typical. The rank counts the share of
+  baseline windows strictly below the period vol, plus half the ties.
+  Fewer than 30 baseline windows means no label.
+* The benchmark gap uses an inner join of dates. Both sides are adjusted
+  closes. It is the difference of the two cumulative simple returns, in
+  percentage points, not a regression alpha.
+* Beta is the sample covariance of the stock's and the benchmark's daily
+  simple returns on shared sessions, divided by the benchmark's sample
+  variance. Correlation is the Pearson correlation of the same pairs.
+* Up capture is the stock's mean daily return on days the benchmark
+  rose, divided by the benchmark's mean on those days. Down capture is
+  the same ratio on days the benchmark fell.
+* Monthly returns chain inside the window: each month's last adjusted
+  close over the previous month's last, with the window's first close
+  as the base of the first month. Compounded, they equal the cumulative
+  return.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
-from data_loader import load_prices
-
-# Number of trading days in a year. Used to annualize daily volatility.
-# (Calendar days would be 365, but markets are closed on weekends/holidays
-# so vol scales by sqrt(252), not sqrt(365). Getting this wrong is one of
-# the most common bugs in junior quant code.)
 TRADING_DAYS = 252
+DAYS_PER_YEAR = 365.25
+MA_SHORT = 50
+MA_LONG = 200
+MIN_MA_WINDOW = 2
+MAX_MA_WINDOW = 400
+ROLLING_VOL_WINDOW = 21
+# About three months of sessions: long enough for a stable regression
+# slope, short enough that the line still moves when the relationship does.
+ROLLING_BETA_WINDOW = 63
+VOL_QUIET_PERCENTILE = 0.20
+VOL_ELEVATED_PERCENTILE = 0.80
+MIN_RETURNS_FOR_VOL = 2
+MIN_BASELINE_WINDOWS = 30
+MIN_PRICES = 2
+# Ratios built from a mean daily return are noise on a handful of days.
+# Twenty returns is one month of sessions.
+MIN_RETURNS_FOR_RATIOS = 20
+# Capture ratios average each side separately, so each side needs its own sample.
+MIN_CAPTURE_DAYS = 10
+# A one-year preset starts on the first session on or after the anchor
+# date, so it can span a few days less than 365. Anything shorter than
+# this is a part-year, and compounding a part-year into a yearly rate
+# reports a return nobody earned.
+MIN_ANNUALIZE_CALENDAR_DAYS = 360
+DEFAULT_RISK_FREE = 0.0
+RISK_FREE_MIN = 0.0
+RISK_FREE_MAX = 0.20
+BETA_HIGH = 1.2
+BETA_LOW = 0.8
+CORRELATION_STRONG = 0.7
+CORRELATION_WEAK = 0.3
+REBASE_LEVEL = 100.0
+_EPSILON = 1e-12
+
+PRESETS = ("1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "Max")
+_PRESET_MONTHS = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
+
+# Column name -> Python format string. The page and the Markdown summary
+# both print the comparison table through this one mapping.
+TABLE_FORMATS = {
+    "Return": "{:+.1%}",
+    "Annualized return": "{:+.1%}",
+    "Volatility": "{:.1%}",
+    "Max drawdown": "{:.1%}",
+    "Sharpe": "{:.2f}",
+    "Sortino": "{:.2f}",
+    "Beta": "{:.2f}",
+    "Correlation": "{:.2f}",
+    "Up capture": "{:.0%}",
+    "Down capture": "{:.0%}",
+    "Vs benchmark (pp)": "{:+.1f}",
+    "Sessions": "{:.0f}",
+}
+MISSING = "—"
 
 
-def add_log_returns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Daily log return: r_t = ln(close_t / close_{t-1}).
-
-    Why log instead of simple (% change)?
-      1. Time-additive: log returns sum cleanly across periods,
-         so a 21-day return is just the rolling sum of 21 daily ones.
-      2. Symmetric: a +10% then -10% sequence nets to ~0 in logs,
-         but to -1% in simple returns. The log version reflects what
-         actually happened to your portfolio more honestly.
-      3. Closer to Gaussian in the small, which most ML/quant models
-         secretly assume.
-    """
-    out = df.copy()
-    out["log_return"] = np.log(out["close"] / out["close"].shift(1))
-    return out
+class AnalysisError(ValueError):
+    """The selected window cannot support a briefing."""
 
 
-def add_volatility(df: pd.DataFrame, window: int = 21) -> pd.DataFrame:
-    """
-    Rolling annualized volatility of log returns.
+@dataclass(frozen=True)
+class PeriodStats:
+    ticker: str
+    benchmark: str | None
+    window_start: pd.Timestamp
+    window_end: pd.Timestamp
+    n_days: int
+    calendar_days: int
+    first_price: float
+    last_price: float
+    cumulative_return: float
+    annualized_return: float | None
+    annualized_volatility: float | None
+    n_returns: int
+    risk_free_rate: float
+    sharpe: float | None
+    sortino: float | None
+    max_drawdown: float | None
+    drawdown_peak: pd.Timestamp | None
+    drawdown_trough: pd.Timestamp | None
+    drawdown_peak_price: float | None
+    drawdown_trough_price: float | None
+    best_day: pd.Timestamp | None
+    best_day_return: float | None
+    worst_day: pd.Timestamp | None
+    worst_day_return: float | None
+    positive_day_share: float | None
+    vol_percentile: float | None
+    vol_label: str | None
+    vol_baseline_count: int
+    ma_short_window: int
+    ma_long_window: int
+    ma_short: float | None
+    ma_long: float | None
+    benchmark_cumulative_return: float | None
+    aligned_stock_return: float | None
+    excess_return: float | None
+    aligned_days: int
+    dropped_stock_sessions: int
+    return_pairs: int
+    beta: float | None
+    beta_label: str | None
+    correlation: float | None
+    correlation_label: str | None
+    up_capture: float | None
+    down_capture: float | None
+    up_days: int
+    down_days: int
 
-    Window choice is a tradeoff:
-      - 21 days  (~1 trading month) reacts quickly, but is noisier
-      - 63 days  (~3 months) is smoother but lags real regime shifts
-      - 252 days (~1 year) is the textbook "long-run" vol, very lagged
 
-    Annualization: daily std * sqrt(252). Volatility scales with the
-    sqrt of time under the random-walk assumption that underlies most
-    pricing models.
-    """
-    out = df.copy()
-    out[f"volatility_{window}d"] = (
-        out["log_return"].rolling(window).std() * np.sqrt(TRADING_DAYS)
+@dataclass(frozen=True)
+class ChartData:
+    price: pd.Series
+    ohlc: pd.DataFrame
+    ma_short: pd.Series
+    ma_long: pd.Series
+    drawdown: pd.Series
+    rolling_vol: pd.Series
+    returns: pd.Series
+    benchmark_returns: pd.Series | None
+    monthly: pd.Series
+    rolling_beta: pd.Series | None
+    rolling_correlation: pd.Series | None
+    aligned: pd.DataFrame | None
+
+
+@dataclass(frozen=True)
+class PeriodReport:
+    stats: PeriodStats
+    charts: ChartData
+    sentences: tuple[str, ...]
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """Several symbols over one requested range, plus the benchmark's own row."""
+
+    rows: tuple[PeriodStats, ...]
+    benchmark: str | None
+    rebased: pd.DataFrame | None
+    sentences: tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
+# Definitions shown on the page
+# ---------------------------------------------------------------------------
+
+
+def methodology_notes(ma_short: int = MA_SHORT, ma_long: int = MA_LONG) -> tuple[str, ...]:
+    """The rules, with the same constants the calculations use."""
+    return (
+        "Cumulative return is the adjusted close on the last session of the "
+        "window divided by the adjusted close on the first session, minus one.",
+        "Annualized return (CAGR) is one plus the cumulative return, raised to "
+        f"{DAYS_PER_YEAR} divided by the calendar days between the first and "
+        "last session, minus one. It is withheld when the window spans fewer "
+        f"than {MIN_ANNUALIZE_CALENDAR_DAYS} calendar days, because compounding "
+        "a few months into a yearly rate reports a return nobody earned.",
+        "Annualized volatility is the sample standard deviation, with divisor "
+        f"N−1, of the daily log returns inside the window, multiplied by the "
+        f"square root of {TRADING_DAYS}. Log returns are the natural log of "
+        "today's adjusted close over yesterday's. At least "
+        f"{MIN_RETURNS_FOR_VOL} daily returns are required.",
+        "The Sharpe ratio is the mean daily simple return above the daily "
+        "risk-free rate, divided by the sample standard deviation of those "
+        f"excess returns, multiplied by the square root of {TRADING_DAYS}. The "
+        "daily risk-free rate is one plus the annual rate, raised to "
+        f"1/{TRADING_DAYS}, minus one. The annual rate is the sidebar setting.",
+        "The Sortino ratio uses the same numerator as Sharpe. Its denominator "
+        "is the downside deviation: the square root of the mean squared "
+        "shortfall below the risk-free rate, where days at or above the rate "
+        "count as zero and every day is in the divisor. Both ratios need at "
+        f"least {MIN_RETURNS_FOR_RATIOS} daily returns.",
+        "Maximum drawdown is the deepest decline from a prior peak to a later "
+        "close inside the window. The peak is the highest adjusted close on "
+        "or before the trough. A window that never closes below a prior peak "
+        "has a drawdown of zero.",
+        "Best day and worst day are the largest and smallest daily simple "
+        "returns inside the window. The share of gains is the fraction of "
+        "daily returns above zero.",
+        f"The {ma_short}-day and {ma_long}-day lines are simple moving averages "
+        "of adjusted close. Each average is computed on the full loaded history "
+        "and then restricted to the selected dates, so an average can be drawn "
+        "at the start of a short window when earlier bars were loaded.",
+        volatility_rule_text(),
+        "The benchmark comparison keeps only dates present in both series. "
+        "Both prices are adjusted closes. Each cumulative return runs from the "
+        "first shared session to the last. The gap is the stock's cumulative "
+        "return minus the benchmark's, reported in percentage points. It is "
+        "not a regression alpha and it is not compared with the VIX.",
+        beta_rule_text(),
+        correlation_rule_text(),
+        "Up capture is the stock's mean daily return on the days the benchmark "
+        "rose, divided by the benchmark's mean daily return on those days. Down "
+        "capture is the same ratio on the days the benchmark fell. 100% means "
+        "the stock's average move matched the benchmark's on that kind of day. "
+        f"Each side needs at least {MIN_CAPTURE_DAYS} days. This is a daily "
+        "arithmetic version, not the monthly compounded figure fund fact "
+        "sheets print.",
+        f"Rolling beta and rolling correlation use the trailing "
+        f"{ROLLING_BETA_WINDOW} shared daily returns, computed on the full "
+        "loaded history and then shown on the selected dates.",
+        "Monthly returns chain inside the window: each calendar month's last "
+        "adjusted close over the previous month's last, with the window's first "
+        "close as the base of the first month. The first and last months can be "
+        "partial. Compounded, the monthly figures equal the cumulative return.",
+        "The side-by-side table gives each symbol its own sessions inside the "
+        "requested range. The rebased chart starts every line at "
+        f"{REBASE_LEVEL:.0f} on the first session all of them share.",
     )
-    return out
 
 
-def add_momentum(df: pd.DataFrame, window: int = 63) -> pd.DataFrame:
+def volatility_rule_text() -> str:
+    quiet = f"{VOL_QUIET_PERCENTILE:.0%}"
+    elevated = f"{VOL_ELEVATED_PERCENTILE:.0%}"
+    return (
+        f"The volatility label ranks the selected window's annualized volatility "
+        f"against this symbol's rolling {ROLLING_VOL_WINDOW}-day annualized "
+        f"volatilities on the full loaded history, not only inside the window. "
+        f"Quiet means a percentile rank of {quiet} or below. Elevated means "
+        f"{elevated} or above. A rank between those cuts is typical. The rank "
+        f"is the share of baseline windows strictly below the period volatility, "
+        f"plus half the share that tie with it. The label is withheld when fewer "
+        f"than {MIN_BASELINE_WINDOWS} baseline windows exist."
+    )
+
+
+def beta_rule_text() -> str:
+    return (
+        "Beta is the sample covariance of the stock's and the benchmark's daily "
+        "simple returns on shared sessions, divided by the benchmark's sample "
+        f"variance. The label is high at {BETA_HIGH:.2f} or above, low from zero "
+        f"to {BETA_LOW:.2f}, inverse below zero, and market-like between "
+        f"{BETA_LOW:.2f} and {BETA_HIGH:.2f}. It needs at least "
+        f"{MIN_RETURNS_FOR_RATIOS} shared daily returns."
+    )
+
+
+def correlation_rule_text() -> str:
+    return (
+        "Correlation is the Pearson correlation of the same daily return pairs. "
+        f"The label is strong when its size is {CORRELATION_STRONG:.2f} or more, "
+        f"weak when it is below {CORRELATION_WEAK:.2f}, and moderate between "
+        "them. A negative value is labeled negative."
+    )
+
+
+def metric_help() -> dict[str, str]:
+    """One line per headline number, drawn from the same definitions."""
+    notes = methodology_notes()
+    return {
+        "cumulative_return": notes[0],
+        "annualized_return": notes[1],
+        "annualized_volatility": (
+            f"Sample standard deviation of daily log returns, times sqrt({TRADING_DAYS})."
+        ),
+        "sharpe": notes[3],
+        "sortino": notes[4],
+        "max_drawdown": "Deepest close-to-prior-peak decline inside the selected window.",
+        "excess_return": (
+            "Stock cumulative return minus benchmark cumulative return, "
+            "on shared sessions only, in percentage points."
+        ),
+        "beta": beta_rule_text(),
+        "correlation": correlation_rule_text(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Windows
+# ---------------------------------------------------------------------------
+
+
+def window_for_preset(index: pd.DatetimeIndex, preset: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Calendar window ending on the last loaded bar."""
+    if preset not in PRESETS:
+        raise AnalysisError(f"Unknown range '{preset}'.")
+    last = pd.Timestamp(index.max()).normalize()
+    first = pd.Timestamp(index.min()).normalize()
+    if preset == "Max":
+        start = first
+    elif preset == "YTD":
+        start = pd.Timestamp(year=int(last.year), month=1, day=1)
+    else:
+        start = last - pd.DateOffset(months=_PRESET_MONTHS[preset])
+    if start < first:
+        start = first
+    return start, last
+
+
+def resolve_window(index: pd.DatetimeIndex, start, end) -> tuple[pd.Timestamp, pd.Timestamp, tuple[str, ...]]:
     """
-    Trailing N-day momentum = sum of log returns over the last N days.
-
-    This is the classic "trend" feature: positive = the stock has been
-    going up recently, negative = down. We'll use it as the COLOR
-    dimension in the scatter plot — letting the eye see whether high-
-    vol high-return points are also trending up (potentially healthy
-    trends) vs trending down (potentially capitulation).
-
-    63 days ≈ 3 months, a common momentum lookback in academic factor
-    literature (Jegadeesh-Titman 1993 used 3-12 month windows).
+    Clamp a requested calendar range to the loaded bars and say when
+    the clamp moved a boundary.
     """
-    out = df.copy()
-    out[f"momentum_{window}d"] = out["log_return"].rolling(window).sum()
-    return out
+    first = pd.Timestamp(index.min()).normalize()
+    last = pd.Timestamp(index.max()).normalize()
+    start_ts = pd.Timestamp(start).tz_localize(None).normalize()
+    end_ts = pd.Timestamp(end).tz_localize(None).normalize()
+    if end_ts < start_ts:
+        raise AnalysisError("The end date is before the start date.")
+    if end_ts < first or start_ts > last:
+        raise AnalysisError(
+            f"No trading days between {start_ts.date()} and {end_ts.date()}. "
+            f"Loaded history runs from {first.date()} to {last.date()}."
+        )
+    notes: list[str] = []
+    if start_ts < first:
+        notes.append(
+            f"The range starts on {start_ts.date()}, before this symbol's first loaded bar, "
+            f"so its window begins on {first.date()}."
+        )
+        start_ts = first
+    if end_ts > last:
+        notes.append(
+            f"The range ends on {end_ts.date()}, after this symbol's last loaded bar, "
+            f"so its window ends on {last.date()}."
+        )
+        end_ts = last
+    return start_ts, end_ts, tuple(notes)
 
 
-def build_features(
-    df: pd.DataFrame,
-    vol_window: int = 21,
-    mom_window: int = 63,
-) -> pd.DataFrame:
+def validate_average_windows(ma_short: int, ma_long: int) -> tuple[int, int]:
+    """Two whole-number windows, the short one strictly shorter."""
+    try:
+        short, long = int(ma_short), int(ma_long)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisError("Moving-average windows must be whole numbers.") from exc
+    if short < MIN_MA_WINDOW or long > MAX_MA_WINDOW:
+        raise AnalysisError(
+            f"Moving-average windows must be between {MIN_MA_WINDOW} and {MAX_MA_WINDOW} days."
+        )
+    if short >= long:
+        raise AnalysisError(
+            f"The short average ({short} days) must be shorter than the long average ({long} days)."
+        )
+    return short, long
+
+
+def validate_risk_free(rate: float) -> float:
+    """An annual rate as a fraction, inside the range the page offers."""
+    try:
+        value = float(rate)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisError("The risk-free rate must be a number.") from exc
+    if not np.isfinite(value) or value < RISK_FREE_MIN or value > RISK_FREE_MAX:
+        raise AnalysisError(
+            f"The risk-free rate must be between {RISK_FREE_MIN:.0%} and {RISK_FREE_MAX:.0%} a year."
+        )
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Single-series calculations
+# ---------------------------------------------------------------------------
+
+
+def cumulative_return(prices: pd.Series) -> float:
+    """End price over start price, minus one. Prices must be positive."""
+    if len(prices) < MIN_PRICES:
+        raise AnalysisError("A cumulative return needs two adjusted closes.")
+    start = float(prices.iloc[0])
+    end = float(prices.iloc[-1])
+    if start <= 0 or end <= 0:
+        raise AnalysisError("Adjusted closes must be positive to compute a return.")
+    return end / start - 1.0
+
+
+def annualized_return(prices: pd.Series) -> float:
     """
-    Apply the full feature pipeline.
+    Compound annual growth rate by calendar time.
 
-    Order matters: returns first, because volatility and momentum both
-    depend on them. This is the contract the plot layer will consume.
+    Calendar days, not sessions, are the exponent: a year of holding is
+    a year whether it had 250 sessions or 253.
     """
-    out = add_log_returns(df)
-    out = add_volatility(out, window=vol_window)
-    out = add_momentum(out, window=mom_window)
+    total = cumulative_return(prices)
+    days = _calendar_days(prices.index)
+    if days < MIN_ANNUALIZE_CALENDAR_DAYS:
+        raise AnalysisError(
+            f"An annualized return needs at least {MIN_ANNUALIZE_CALENDAR_DAYS} calendar days."
+        )
+    return float((1.0 + total) ** (DAYS_PER_YEAR / days) - 1.0)
 
-    # Tag the windows in attrs so the plot layer can label axes
-    # without having to be told the parameter values separately.
-    out.attrs["vol_window"] = vol_window
-    out.attrs["mom_window"] = mom_window
-    out.attrs["ticker"] = df.attrs.get("ticker", "?")
-    return out
+
+def daily_log_returns(prices: pd.Series) -> pd.Series:
+    """r_t = ln(P_t / P_{t-1}). The first observation is NaN by construction."""
+    return np.log(prices.astype(float) / prices.astype(float).shift(1))
+
+
+def daily_simple_returns(prices: pd.Series) -> pd.Series:
+    """R_t = P_t / P_{t-1} − 1. The first observation is NaN by construction."""
+    series = prices.astype(float)
+    return series / series.shift(1) - 1.0
+
+
+def annualized_volatility(log_returns: pd.Series) -> float:
+    """
+    Sample daily standard deviation annualized with sqrt(252).
+    Requires at least two finite returns; one return has no sample spread.
+    """
+    clean = _finite(log_returns)
+    if len(clean) < MIN_RETURNS_FOR_VOL:
+        raise AnalysisError(
+            f"Annualized volatility needs at least {MIN_RETURNS_FOR_VOL} daily returns."
+        )
+    return float(clean.std(ddof=1) * np.sqrt(TRADING_DAYS))
+
+
+def daily_risk_free(annual_rate: float) -> float:
+    """The daily rate that compounds to ``annual_rate`` over 252 sessions."""
+    return float((1.0 + annual_rate) ** (1.0 / TRADING_DAYS) - 1.0)
+
+
+def sharpe_ratio(returns: pd.Series, risk_free: float = DEFAULT_RISK_FREE) -> float:
+    """
+    Mean excess daily return over its sample standard deviation,
+    annualized with sqrt(252). Undefined when the returns do not vary.
+    """
+    excess = _excess_returns(returns, risk_free)
+    spread = float(excess.std(ddof=1))
+    if spread <= _EPSILON:
+        raise AnalysisError("The Sharpe ratio is undefined when daily returns do not vary.")
+    return float(excess.mean() / spread * np.sqrt(TRADING_DAYS))
+
+
+def downside_deviation(returns: pd.Series, risk_free: float = DEFAULT_RISK_FREE) -> float:
+    """
+    Root mean square of the below-rate days. Days at or above the rate
+    count as zero and stay in the divisor, so a window with few bad days
+    is not penalized as if every day had been one.
+    """
+    excess = _excess_returns(returns, risk_free)
+    shortfall = excess.clip(upper=0.0)
+    return float(np.sqrt((shortfall**2).mean()))
+
+
+def sortino_ratio(returns: pd.Series, risk_free: float = DEFAULT_RISK_FREE) -> float:
+    """Mean excess daily return over the downside deviation, times sqrt(252)."""
+    excess = _excess_returns(returns, risk_free)
+    downside = downside_deviation(returns, risk_free)
+    if downside <= _EPSILON:
+        raise AnalysisError("The Sortino ratio is undefined when no day falls below the risk-free rate.")
+    return float(excess.mean() / downside * np.sqrt(TRADING_DAYS))
+
+
+def max_drawdown(prices: pd.Series) -> dict:
+    """
+    Deepest peak-to-trough decline inside ``prices``.
+
+    The running peak is the maximum adjusted close up to each day. The
+    trough is the day that ratio is smallest. The peak date is the day
+    that running peak was last set on or before the trough.
+    """
+    series = prices.astype(float).dropna()
+    if series.empty:
+        raise AnalysisError("Maximum drawdown needs a price series.")
+    running_peak = series.cummax()
+    drawdown = series / running_peak - 1.0
+    trough = drawdown.idxmin()
+    depth = float(drawdown.loc[trough])
+    peak_level = float(running_peak.loc[trough])
+    at_peak = series.loc[:trough] >= peak_level - 1e-9
+    peak = series.loc[:trough].loc[at_peak].index[-1]
+    return {
+        "max_drawdown": depth,
+        "peak": pd.Timestamp(peak),
+        "trough": pd.Timestamp(trough),
+        "peak_price": float(series.loc[peak]),
+        "trough_price": float(series.loc[trough]),
+        "series": drawdown,
+    }
+
+
+def extreme_days(returns: pd.Series) -> dict:
+    """The largest and smallest daily return, each with its date."""
+    clean = _finite(returns)
+    if clean.empty:
+        raise AnalysisError("Best and worst day need at least one daily return.")
+    best = clean.idxmax()
+    worst = clean.idxmin()
+    return {
+        "best_day": pd.Timestamp(best),
+        "best_day_return": float(clean.loc[best]),
+        "worst_day": pd.Timestamp(worst),
+        "worst_day_return": float(clean.loc[worst]),
+    }
+
+
+def positive_share(returns: pd.Series) -> float:
+    """Fraction of daily returns strictly above zero."""
+    clean = _finite(returns)
+    if clean.empty:
+        raise AnalysisError("The share of gains needs at least one daily return.")
+    return float((clean > 0).mean())
+
+
+def moving_average(prices: pd.Series, window: int) -> pd.Series:
+    """Simple moving average. The first window−1 values stay missing."""
+    if window < MIN_PRICES:
+        raise AnalysisError("A moving-average window must be at least 2.")
+    return prices.astype(float).rolling(window, min_periods=window).mean()
+
+
+def rolling_annualized_volatility(log_returns: pd.Series, window: int = ROLLING_VOL_WINDOW) -> pd.Series:
+    """Trailing annualized sample volatility. Warmup rows stay NaN."""
+    return log_returns.rolling(window, min_periods=window).std(ddof=1) * np.sqrt(TRADING_DAYS)
+
+
+def percentile_rank(value: float, sample: pd.Series) -> float:
+    """Mid-rank: share strictly below, plus half the ties."""
+    clean = pd.Series(sample).dropna()
+    if clean.empty:
+        raise AnalysisError("A percentile rank needs a baseline sample.")
+    below = float((clean < value).mean())
+    tied = float((clean == value).mean())
+    return below + 0.5 * tied
+
+
+def volatility_label(percentile: float) -> str:
+    if percentile >= VOL_ELEVATED_PERCENTILE:
+        return "elevated"
+    if percentile <= VOL_QUIET_PERCENTILE:
+        return "quiet"
+    return "typical"
+
+
+def monthly_returns(prices: pd.Series) -> pd.Series:
+    """
+    Calendar-month returns that chain inside ``prices``.
+
+    Each month ends on its last close in the series. The first month
+    starts from the first close in the series, not from a month-end
+    outside it, so the product of (1 + month) is the cumulative return
+    of the whole series.
+    """
+    series = prices.astype(float).dropna()
+    if len(series) < MIN_PRICES:
+        raise AnalysisError("Monthly returns need two adjusted closes.")
+    month_end = series.groupby(series.index.to_period("M")).last()
+    base = month_end.shift(1)
+    base.iloc[0] = float(series.iloc[0])
+    return month_end / base - 1.0
+
+
+def monthly_table(monthly: pd.Series) -> pd.DataFrame:
+    """Years down the side, months 1–12 across. Months outside the window stay NaN."""
+    frame = pd.DataFrame(
+        {
+            "year": monthly.index.year,
+            "month": monthly.index.month,
+            "value": monthly.to_numpy(),
+        }
+    )
+    table = frame.pivot(index="year", columns="month", values="value")
+    return table.reindex(columns=range(1, 13))
+
+
+def adjusted_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Open, high, low and close on the adjusted-close scale, plus volume.
+
+    Each bar is scaled by adjusted close over raw close, the way Yahoo's
+    auto-adjust does it. Candles then sit on the same scale as the
+    moving averages, which are built from adjusted close. Live Yahoo
+    bars are already adjusted, so their factor is one.
+    """
+    factor = frame["adj_close"].astype(float) / frame["close"].astype(float)
+    return pd.DataFrame(
+        {
+            "open": frame["open"].astype(float) * factor,
+            "high": frame["high"].astype(float) * factor,
+            "low": frame["low"].astype(float) * factor,
+            "close": frame["adj_close"].astype(float),
+            "volume": frame["volume"].astype(float),
+        },
+        index=frame.index,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stock-versus-benchmark calculations
+# ---------------------------------------------------------------------------
+
+
+def align_adjusted(stock: pd.Series, benchmark: pd.Series) -> pd.DataFrame:
+    """
+    Inner join on the timestamp. No forward fill: a session missing on
+    either side is left out of the comparison rather than invented.
+    """
+    frame = pd.concat(
+        {"stock": stock.astype(float), "benchmark": benchmark.astype(float)},
+        axis=1,
+        join="inner",
+    ).dropna()
+    frame = frame.sort_index()
+    return frame[~frame.index.duplicated(keep="last")]
+
+
+def paired_returns(aligned: pd.DataFrame) -> pd.DataFrame:
+    """
+    Daily simple returns between consecutive shared sessions. Both
+    columns span the same two dates, so each row is a fair pair.
+    """
+    return (aligned / aligned.shift(1) - 1.0).dropna()
+
+
+def beta(stock_returns: pd.Series, benchmark_returns: pd.Series) -> float:
+    """Sample covariance with the benchmark over the benchmark's sample variance."""
+    pairs = _pairs(stock_returns, benchmark_returns)
+    variance = float(pairs["benchmark"].var(ddof=1))
+    if variance <= _EPSILON:
+        raise AnalysisError("Beta is undefined when the benchmark's returns do not vary.")
+    covariance = float(pairs["stock"].cov(pairs["benchmark"]))
+    return covariance / variance
+
+
+def correlation(stock_returns: pd.Series, benchmark_returns: pd.Series) -> float:
+    """Pearson correlation of paired daily returns."""
+    pairs = _pairs(stock_returns, benchmark_returns)
+    if float(pairs["stock"].std(ddof=1)) <= _EPSILON or float(pairs["benchmark"].std(ddof=1)) <= _EPSILON:
+        raise AnalysisError("Correlation is undefined when either series does not vary.")
+    return float(pairs["stock"].corr(pairs["benchmark"]))
+
+
+def capture_ratio(stock_returns: pd.Series, benchmark_returns: pd.Series, *, side: str) -> float:
+    """
+    The stock's mean daily return over the benchmark's, on the days the
+    benchmark rose (``side="up"``) or fell (``side="down"``).
+    """
+    if side not in ("up", "down"):
+        raise AnalysisError("Capture side must be 'up' or 'down'.")
+    pairs = _pairs(stock_returns, benchmark_returns, minimum=1)
+    days = pairs[pairs["benchmark"] > 0] if side == "up" else pairs[pairs["benchmark"] < 0]
+    if days.empty:
+        raise AnalysisError(f"No days on which the benchmark moved {side}.")
+    return float(days["stock"].mean() / days["benchmark"].mean())
+
+
+def rolling_beta(
+    stock_returns: pd.Series,
+    benchmark_returns: pd.Series,
+    window: int = ROLLING_BETA_WINDOW,
+) -> pd.Series:
+    """Trailing beta over ``window`` paired returns. Warmup rows stay NaN."""
+    pairs = _pairs(stock_returns, benchmark_returns, minimum=1)
+    covariance = pairs["stock"].rolling(window, min_periods=window).cov(pairs["benchmark"])
+    variance = pairs["benchmark"].rolling(window, min_periods=window).var(ddof=1)
+    return covariance / variance.where(variance > _EPSILON)
+
+
+def rolling_correlation(
+    stock_returns: pd.Series,
+    benchmark_returns: pd.Series,
+    window: int = ROLLING_BETA_WINDOW,
+) -> pd.Series:
+    """Trailing Pearson correlation over ``window`` paired returns."""
+    pairs = _pairs(stock_returns, benchmark_returns, minimum=1)
+    return pairs["stock"].rolling(window, min_periods=window).corr(pairs["benchmark"])
+
+
+def beta_label(value: float) -> str:
+    if value < 0:
+        return "inverse"
+    if value >= BETA_HIGH:
+        return "high"
+    if value <= BETA_LOW:
+        return "low"
+    return "market-like"
+
+
+def correlation_label(value: float) -> str:
+    size = abs(value)
+    if size >= CORRELATION_STRONG:
+        strength = "strong"
+    elif size < CORRELATION_WEAK:
+        strength = "weak"
+    else:
+        strength = "moderate"
+    return f"{strength} negative" if value < 0 else strength
+
+
+def rebase(prices: pd.DataFrame, level: float = REBASE_LEVEL) -> pd.DataFrame:
+    """Every column divided by its first row, times ``level``."""
+    if prices.empty:
+        raise AnalysisError("Rebasing needs at least one shared session.")
+    return prices / prices.iloc[0] * level
+
+
+def shared_sessions(series: dict[str, pd.Series]) -> pd.DataFrame:
+    """Inner join of several price series. One column per symbol, no fill."""
+    frame = pd.concat({name: values.astype(float) for name, values in series.items()}, axis=1, join="inner")
+    return frame.dropna().sort_index()
+
+
+# ---------------------------------------------------------------------------
+# One symbol over one window
+# ---------------------------------------------------------------------------
+
+
+def build_period(
+    history: pd.DataFrame,
+    *,
+    ticker: str,
+    start,
+    end,
+    benchmark: pd.DataFrame | None = None,
+    benchmark_ticker: str | None = None,
+    ma_short: int = MA_SHORT,
+    ma_long: int = MA_LONG,
+    risk_free: float = DEFAULT_RISK_FREE,
+) -> PeriodReport:
+    """Stats, chart series, and sentences for one window of ``history``."""
+    short_window, long_window = validate_average_windows(ma_short, ma_long)
+    rate = validate_risk_free(risk_free)
+    prices = _adjusted(history)
+    start_ts, end_ts, clamp_notes = resolve_window(prices.index, start, end)
+    window = prices.loc[start_ts:end_ts].dropna()
+    if len(window) < MIN_PRICES:
+        raise AnalysisError(
+            f"{ticker} has {len(window)} trading day(s) between {start_ts.date()} "
+            f"and {end_ts.date()}. A return needs two adjusted closes. "
+            "Widen the range."
+        )
+
+    # Averages and the volatility baseline use the whole loaded file.
+    # The headline return, drawdown, and period vol use only the window.
+    full_returns = daily_log_returns(prices)
+    ma_short_full = moving_average(prices, short_window)
+    ma_long_full = moving_average(prices, long_window)
+    returns = daily_simple_returns(window).dropna()
+    drawdown = max_drawdown(window)
+    last_day = window.index[-1]
+
+    risk = _risk_fields(window, full_returns)
+    reward = _reward_fields(window, returns, rate)
+    relative, relative_charts = _relative_fields(prices, window, benchmark, benchmark_ticker)
+
+    stats = PeriodStats(
+        ticker=ticker,
+        benchmark=benchmark_ticker if benchmark is not None else None,
+        window_start=pd.Timestamp(window.index[0]),
+        window_end=pd.Timestamp(last_day),
+        n_days=int(len(window)),
+        calendar_days=_calendar_days(window.index),
+        first_price=float(window.iloc[0]),
+        last_price=float(window.iloc[-1]),
+        cumulative_return=cumulative_return(window),
+        risk_free_rate=rate,
+        max_drawdown=float(drawdown["max_drawdown"]),
+        drawdown_peak=drawdown["peak"],
+        drawdown_trough=drawdown["trough"],
+        drawdown_peak_price=float(drawdown["peak_price"]),
+        drawdown_trough_price=float(drawdown["trough_price"]),
+        ma_short_window=short_window,
+        ma_long_window=long_window,
+        # The printed average is the value on the last session of the window.
+        # It stays blank while that session is still inside the warmup.
+        ma_short=_value_on(ma_short_full, last_day),
+        ma_long=_value_on(ma_long_full, last_day),
+        **risk,
+        **reward,
+        **relative,
+    )
+    charts = ChartData(
+        price=window,
+        ohlc=adjusted_ohlc(history).reindex(window.index),
+        ma_short=ma_short_full.reindex(window.index),
+        ma_long=ma_long_full.reindex(window.index),
+        drawdown=drawdown["series"],
+        rolling_vol=rolling_annualized_volatility(full_returns).reindex(window.index),
+        returns=returns,
+        monthly=monthly_returns(window),
+        **relative_charts,
+    )
+    sentences = clamp_notes + describe_period(stats)
+    return PeriodReport(stats=stats, charts=charts, sentences=sentences, notes=clamp_notes)
+
+
+def _risk_fields(window: pd.Series, full_returns: pd.Series) -> dict:
+    """Period volatility and where it ranks in the symbol's own history."""
+    baseline = rolling_annualized_volatility(full_returns).dropna()
+    period_returns = daily_log_returns(window).dropna()
+    period_vol = _optional(annualized_volatility, period_returns)
+    percentile = None
+    label = None
+    if period_vol is not None and len(baseline) >= MIN_BASELINE_WINDOWS:
+        percentile = percentile_rank(period_vol, baseline)
+        label = volatility_label(percentile)
+    return {
+        "annualized_volatility": period_vol,
+        "n_returns": int(len(period_returns)),
+        "vol_percentile": percentile,
+        "vol_label": label,
+        "vol_baseline_count": int(len(baseline)),
+    }
+
+
+def _reward_fields(window: pd.Series, returns: pd.Series, risk_free: float) -> dict:
+    """Annualized return, the two risk-adjusted ratios, and the extreme days."""
+    enough = len(returns) >= MIN_RETURNS_FOR_RATIOS
+    extremes = _optional(extreme_days, returns) or {
+        "best_day": None,
+        "best_day_return": None,
+        "worst_day": None,
+        "worst_day_return": None,
+    }
+    return {
+        "annualized_return": _optional(annualized_return, window),
+        "sharpe": _optional(sharpe_ratio, returns, risk_free) if enough else None,
+        "sortino": _optional(sortino_ratio, returns, risk_free) if enough else None,
+        "positive_day_share": _optional(positive_share, returns),
+        **extremes,
+    }
+
+
+def _relative_fields(
+    prices: pd.Series,
+    window: pd.Series,
+    benchmark: pd.DataFrame | None,
+    benchmark_ticker: str | None,
+) -> tuple[dict, dict]:
+    """Everything that needs the benchmark: the gap, beta, correlation, capture."""
+    stats = {
+        "benchmark_cumulative_return": None,
+        "aligned_stock_return": None,
+        "excess_return": None,
+        "aligned_days": 0,
+        "dropped_stock_sessions": 0,
+        "return_pairs": 0,
+        "beta": None,
+        "beta_label": None,
+        "correlation": None,
+        "correlation_label": None,
+        "up_capture": None,
+        "down_capture": None,
+        "up_days": 0,
+        "down_days": 0,
+    }
+    charts = {
+        "aligned": None,
+        "benchmark_returns": None,
+        "rolling_beta": None,
+        "rolling_correlation": None,
+    }
+    if benchmark is None or not benchmark_ticker:
+        return stats, charts
+
+    bench_px = _adjusted(benchmark)
+    aligned = align_adjusted(window, bench_px)
+    charts["aligned"] = aligned
+    stats["aligned_days"] = int(len(aligned))
+    stats["dropped_stock_sessions"] = int(len(window) - len(aligned))
+    if len(aligned) >= MIN_PRICES:
+        stats["aligned_stock_return"] = cumulative_return(aligned["stock"])
+        stats["benchmark_cumulative_return"] = cumulative_return(aligned["benchmark"])
+        stats["excess_return"] = stats["aligned_stock_return"] - stats["benchmark_cumulative_return"]
+
+    pairs = paired_returns(aligned)
+    charts["benchmark_returns"] = pairs["benchmark"]
+    stats["return_pairs"] = int(len(pairs))
+    stats["up_days"] = int((pairs["benchmark"] > 0).sum())
+    stats["down_days"] = int((pairs["benchmark"] < 0).sum())
+    if len(pairs) >= MIN_RETURNS_FOR_RATIOS:
+        stats["beta"] = _optional(beta, pairs["stock"], pairs["benchmark"])
+        stats["correlation"] = _optional(correlation, pairs["stock"], pairs["benchmark"])
+    if stats["beta"] is not None:
+        stats["beta_label"] = beta_label(stats["beta"])
+    if stats["correlation"] is not None:
+        stats["correlation_label"] = correlation_label(stats["correlation"])
+    if stats["up_days"] >= MIN_CAPTURE_DAYS:
+        stats["up_capture"] = _optional(capture_ratio, pairs["stock"], pairs["benchmark"], side="up")
+    if stats["down_days"] >= MIN_CAPTURE_DAYS:
+        stats["down_capture"] = _optional(capture_ratio, pairs["stock"], pairs["benchmark"], side="down")
+
+    # Like the moving averages, the rolling lines are built on every
+    # shared session in the loaded files so a short window still has one.
+    full_pairs = paired_returns(align_adjusted(prices, bench_px))
+    if len(full_pairs) >= ROLLING_BETA_WINDOW:
+        charts["rolling_beta"] = rolling_beta(full_pairs["stock"], full_pairs["benchmark"]).reindex(window.index)
+        charts["rolling_correlation"] = rolling_correlation(
+            full_pairs["stock"], full_pairs["benchmark"]
+        ).reindex(window.index)
+    return stats, charts
+
+
+# ---------------------------------------------------------------------------
+# Several symbols side by side
+# ---------------------------------------------------------------------------
+
+
+def build_comparison(
+    reports: dict[str, PeriodReport],
+    benchmark_report: PeriodReport | None = None,
+) -> Comparison:
+    """
+    Line up the symbols' reports. Each row keeps that symbol's own
+    sessions. The rebased frame keeps only sessions every line shares.
+    """
+    if not reports:
+        raise AnalysisError("A comparison needs at least one symbol.")
+    rows = [report.stats for report in reports.values()]
+    series = {symbol: report.charts.price for symbol, report in reports.items()}
+    benchmark = None
+    if benchmark_report is not None:
+        benchmark = benchmark_report.stats.ticker
+        rows.append(benchmark_report.stats)
+        series[benchmark] = benchmark_report.charts.price
+    shared = shared_sessions(series)
+    rebased = rebase(shared) if len(shared) >= MIN_PRICES else None
+    symbol_rows = tuple(report.stats for report in reports.values())
+    benchmark_stats = None if benchmark_report is None else benchmark_report.stats
+    sentences = describe_comparison(symbol_rows, benchmark_stats, rebased)
+    return Comparison(rows=tuple(rows), benchmark=benchmark, rebased=rebased, sentences=sentences)
+
+
+def comparison_table(comparison: Comparison) -> pd.DataFrame:
+    """One row per symbol, numbers as fractions. Missing figures stay NaN."""
+    records = []
+    for stats in comparison.rows:
+        is_benchmark = stats.ticker == comparison.benchmark
+        gap = None if stats.excess_return is None else stats.excess_return * 100.0
+        records.append(
+            {
+                "Symbol": f"{stats.ticker} (benchmark)" if is_benchmark else stats.ticker,
+                "Return": stats.cumulative_return,
+                "Annualized return": stats.annualized_return,
+                "Volatility": stats.annualized_volatility,
+                "Max drawdown": stats.max_drawdown,
+                "Sharpe": stats.sharpe,
+                "Sortino": stats.sortino,
+                "Beta": stats.beta,
+                "Correlation": stats.correlation,
+                "Up capture": stats.up_capture,
+                "Down capture": stats.down_capture,
+                "Vs benchmark (pp)": gap,
+                "Sessions": stats.n_days,
+            }
+        )
+    table = pd.DataFrame.from_records(records).set_index("Symbol")
+    return table.astype(float)
+
+
+def format_cell(column: str, value) -> str:
+    """One table figure as text. A figure the window could not support prints as a dash."""
+    if value is None or pd.isna(value):
+        return MISSING
+    return TABLE_FORMATS[column].format(value)
+
+
+def describe_comparison(
+    rows: tuple[PeriodStats, ...],
+    benchmark: PeriodStats | None,
+    rebased: pd.DataFrame | None,
+) -> tuple[str, ...]:
+    """Ranking sentences. Empty for a single symbol, which has nothing to rank."""
+    if len(rows) < 2:
+        return ()
+    lines = [_return_ranking(rows, benchmark)]
+    lines.append(_volatility_range(rows))
+    lines.append(_drawdown_range(rows))
+    lines.append(_sharpe_ranking(rows))
+    lines.append(_window_mismatch(rows, rebased))
+    return tuple(line for line in lines if line)
+
+
+def _return_ranking(rows: tuple[PeriodStats, ...], benchmark: PeriodStats | None) -> str:
+    ordered = sorted(rows, key=lambda stats: stats.cumulative_return, reverse=True)
+    listing = ", ".join(f"{stats.ticker} {stats.cumulative_return:+.1%}" for stats in ordered)
+    text = f"Ranked by cumulative return: {listing}."
+    if benchmark is not None:
+        ahead = [stats.ticker for stats in ordered if stats.cumulative_return > benchmark.cumulative_return]
+        text += (
+            f" {benchmark.ticker}, the benchmark, returned {benchmark.cumulative_return:+.1%} "
+            f"over its own sessions in the range, and {len(ahead)} of the {len(rows)} symbols finished ahead of it."
+        )
+    return text
+
+
+def _volatility_range(rows: tuple[PeriodStats, ...]) -> str:
+    measured = [stats for stats in rows if stats.annualized_volatility is not None]
+    if len(measured) < 2:
+        return ""
+    calm = min(measured, key=lambda stats: stats.annualized_volatility)
+    wild = max(measured, key=lambda stats: stats.annualized_volatility)
+    return (
+        f"Annualized volatility runs from {calm.annualized_volatility:.1%} ({calm.ticker}) "
+        f"to {wild.annualized_volatility:.1%} ({wild.ticker})."
+    )
+
+
+def _drawdown_range(rows: tuple[PeriodStats, ...]) -> str:
+    measured = [stats for stats in rows if stats.max_drawdown is not None]
+    if len(measured) < 2:
+        return ""
+    deepest = min(measured, key=lambda stats: stats.max_drawdown)
+    shallowest = max(measured, key=lambda stats: stats.max_drawdown)
+    return (
+        f"The deepest drawdown is {deepest.ticker}'s {deepest.max_drawdown:.1%}; "
+        f"the shallowest is {shallowest.ticker}'s {shallowest.max_drawdown:.1%}."
+    )
+
+
+def _sharpe_ranking(rows: tuple[PeriodStats, ...]) -> str:
+    measured = [stats for stats in rows if stats.sharpe is not None]
+    if len(measured) < 2:
+        return ""
+    best = max(measured, key=lambda stats: stats.sharpe)
+    worst = min(measured, key=lambda stats: stats.sharpe)
+    return (
+        f"Per unit of volatility, {best.ticker} ranks first with a Sharpe ratio of "
+        f"{best.sharpe:.2f} and {worst.ticker} last at {worst.sharpe:.2f}, "
+        f"at a risk-free rate of {best.risk_free_rate:.1%} a year."
+    )
+
+
+def _window_mismatch(rows: tuple[PeriodStats, ...], rebased: pd.DataFrame | None) -> str:
+    """Say so when one symbol's sessions start later than another's."""
+    earliest = min(stats.window_start for stats in rows)
+    late = [stats for stats in rows if stats.window_start > earliest]
+    if not late:
+        return ""
+    listing = ", ".join(f"{stats.ticker} on {stats.window_start.date().isoformat()}" for stats in late)
+    rows_word = "that row covers" if len(late) == 1 else "those rows cover"
+    text = (
+        f"Not every symbol covers the same dates. The earliest starts on "
+        f"{earliest.date().isoformat()}; starting later: {listing}, so {rows_word} a shorter window."
+    )
+    if rebased is not None:
+        text += (
+            f" The rebased chart starts on {rebased.index[0].date().isoformat()}, "
+            "the first session all of them share."
+        )
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Sentences for one symbol
+# ---------------------------------------------------------------------------
+
+
+def describe_period(stats: PeriodStats) -> tuple[str, ...]:
+    """Plain-English sentences. Each number is a field on ``stats``."""
+    lines = [
+        _return_sentence(stats),
+        _volatility_sentence(stats),
+        _ratio_sentence(stats),
+        _drawdown_sentence(stats),
+        _extreme_sentence(stats),
+        _average_sentence(stats),
+        _benchmark_sentence(stats),
+        _beta_sentence(stats),
+        _capture_sentence(stats),
+    ]
+    return tuple(line for line in lines if line)
+
+
+def _return_sentence(stats: PeriodStats) -> str:
+    start = stats.window_start.date().isoformat()
+    end = stats.window_end.date().isoformat()
+    text = (
+        f"{stats.ticker} adjusted close moved from {stats.first_price:.2f} on {start} "
+        f"to {stats.last_price:.2f} on {end}: a cumulative return of "
+        f"{stats.cumulative_return:+.1%} across {stats.n_days} trading days."
+    )
+    if stats.annualized_return is None:
+        return text + (
+            f" No annualized return is shown: the window spans {stats.calendar_days} "
+            f"calendar days and annualizing needs at least {MIN_ANNUALIZE_CALENDAR_DAYS}."
+        )
+    return text + (
+        f" Over {stats.calendar_days} calendar days that compounds to "
+        f"{stats.annualized_return:+.1%} a year."
+    )
+
+
+def _volatility_sentence(stats: PeriodStats) -> str:
+    if stats.annualized_volatility is None:
+        return (
+            f"Annualized volatility is omitted: the window has {stats.n_returns} daily "
+            f"return(s), and the sample standard deviation needs at least {MIN_RETURNS_FOR_VOL}."
+        )
+    text = (
+        f"Annualized volatility is {stats.annualized_volatility:.1%}, "
+        f"from {stats.n_returns} daily log returns."
+    )
+    if stats.n_returns < ROLLING_VOL_WINDOW:
+        text += (
+            f" That uses fewer than {ROLLING_VOL_WINDOW} returns, so the annualized "
+            "figure is a short sample."
+        )
+    if stats.vol_label is None or stats.vol_percentile is None:
+        text += (
+            f" No quiet/typical/elevated label is attached: the loaded history has "
+            f"{stats.vol_baseline_count} rolling {ROLLING_VOL_WINDOW}-day windows and "
+            f"the label needs at least {MIN_BASELINE_WINDOWS}."
+        )
+        return text
+    rank = stats.vol_percentile * 100
+    text += (
+        f" The label is {stats.vol_label}: this {stats.annualized_volatility:.1%} sits at "
+        f"percentile rank {rank:.1f} of the {stats.vol_baseline_count} rolling "
+        f"{ROLLING_VOL_WINDOW}-day volatilities in the loaded history. "
+        f"Quiet is {VOL_QUIET_PERCENTILE:.0%} or below, elevated is "
+        f"{VOL_ELEVATED_PERCENTILE:.0%} or above, and the rank between them is typical."
+    )
+    return text
+
+
+def _ratio_sentence(stats: PeriodStats) -> str:
+    rate = f"{stats.risk_free_rate:.1%}"
+    if stats.sharpe is None:
+        return (
+            f"Sharpe and Sortino ratios are omitted: they need at least "
+            f"{MIN_RETURNS_FOR_RATIOS} daily returns that vary, and this window has {stats.n_returns}."
+        )
+    text = f"The Sharpe ratio is {stats.sharpe:.2f}"
+    if stats.sortino is None:
+        text += f" at a risk-free rate of {rate} a year. The Sortino ratio is omitted: no day fell below that rate."
+    else:
+        text += f" and the Sortino ratio is {stats.sortino:.2f}, at a risk-free rate of {rate} a year."
+    if stats.sharpe > 0:
+        return text + " Both are positive because the average daily return was above that rate."
+    if stats.sharpe < 0:
+        return text + " Both are negative because the average daily return was below that rate."
+    return text
+
+
+def _drawdown_sentence(stats: PeriodStats) -> str:
+    if stats.max_drawdown is None or stats.drawdown_peak is None or stats.drawdown_trough is None:
+        return ""
+    if abs(stats.max_drawdown) < _EPSILON:
+        return (
+            "Maximum drawdown is 0.0%: the adjusted close never finished below "
+            "a prior peak inside this window."
+        )
+    return (
+        f"Maximum drawdown is {stats.max_drawdown:.1%}, from a peak of "
+        f"{stats.drawdown_peak_price:.2f} on {stats.drawdown_peak.date().isoformat()} "
+        f"to a trough of {stats.drawdown_trough_price:.2f} on "
+        f"{stats.drawdown_trough.date().isoformat()}."
+    )
+
+
+def _extreme_sentence(stats: PeriodStats) -> str:
+    if stats.best_day is None or stats.worst_day is None or stats.positive_day_share is None:
+        return ""
+    return (
+        f"The best day was {stats.best_day_return:+.1%} on {stats.best_day.date().isoformat()} "
+        f"and the worst was {stats.worst_day_return:+.1%} on {stats.worst_day.date().isoformat()}. "
+        f"{stats.positive_day_share:.0%} of the {stats.n_returns} daily moves were gains."
+    )
+
+
+def _average_sentence(stats: PeriodStats) -> str:
+    end = stats.window_end.date().isoformat()
+    parts: list[str] = []
+    if stats.ma_short is None:
+        parts.append(
+            f"The {stats.ma_short_window}-day average is not available on {end}: "
+            f"that average needs {stats.ma_short_window} earlier adjusted closes."
+        )
+    else:
+        relation = _relation(stats.last_price, stats.ma_short)
+        parts.append(
+            f"On {end} the close is {relation} the "
+            f"{stats.ma_short_window}-day average of {stats.ma_short:.2f}."
+        )
+    if stats.ma_long is None:
+        parts.append(
+            f"The {stats.ma_long_window}-day average is not available on {end}: "
+            f"that average needs {stats.ma_long_window} earlier adjusted closes."
+        )
+    else:
+        relation = _relation(stats.last_price, stats.ma_long)
+        parts.append(
+            f"The close is {relation} the {stats.ma_long_window}-day average of {stats.ma_long:.2f}."
+        )
+    return " ".join(parts)
+
+
+def _benchmark_sentence(stats: PeriodStats) -> str:
+    if not stats.benchmark:
+        return ""
+    if stats.aligned_days < MIN_PRICES or stats.benchmark_cumulative_return is None:
+        return (
+            f"The {stats.benchmark} comparison is omitted: only {stats.aligned_days} "
+            "shared session(s), and a return needs two."
+        )
+    gap = float(stats.excess_return)
+    points = gap * 100
+    # 0.05 percentage points prints as 0.0 at one decimal place.
+    if abs(points) < 0.05:
+        text = (
+            f"On the {stats.aligned_days} shared sessions, {stats.ticker} and "
+            f"{stats.benchmark} both returned {stats.aligned_stock_return:+.1%}."
+        )
+    else:
+        direction = "higher" if gap > 0 else "lower"
+        text = (
+            f"On the {stats.aligned_days} shared sessions, {stats.ticker} returned "
+            f"{stats.aligned_stock_return:+.1%} and {stats.benchmark} returned "
+            f"{stats.benchmark_cumulative_return:+.1%}. {stats.ticker} is "
+            f"{abs(points):.1f} percentage points {direction}."
+        )
+    if stats.dropped_stock_sessions == 0:
+        text += " Every session in the stock window has a benchmark print."
+    else:
+        text += (
+            f" {stats.dropped_stock_sessions} {stats.ticker} session(s) have no "
+            f"{stats.benchmark} print and are left out of the comparison."
+        )
+    return text
+
+
+def _beta_sentence(stats: PeriodStats) -> str:
+    if not stats.benchmark:
+        return ""
+    if stats.beta is None or stats.correlation is None:
+        return (
+            f"Beta and correlation against {stats.benchmark} are omitted: they need at least "
+            f"{MIN_RETURNS_FOR_RATIOS} shared daily returns that vary, and this window has "
+            f"{stats.return_pairs}."
+        )
+    return (
+        f"Against {stats.benchmark}, beta is {stats.beta:.2f} "
+        f"({stats.beta_label}: {_beta_rule(stats.beta_label)}) and the correlation of daily "
+        f"returns is {stats.correlation:.2f} ({stats.correlation_label}: "
+        f"{_correlation_rule(stats.correlation)}), from {stats.return_pairs} shared daily returns. "
+        f"A beta of {stats.beta:.2f} means {stats.ticker} moved about {abs(stats.beta):.2f}% "
+        f"on average, in the {'opposite' if stats.beta < 0 else 'same'} direction, "
+        f"for each 1% move in {stats.benchmark}."
+    )
+
+
+def _capture_sentence(stats: PeriodStats) -> str:
+    if not stats.benchmark:
+        return ""
+    if stats.up_capture is None or stats.down_capture is None:
+        if stats.return_pairs == 0:
+            return ""
+        return (
+            f"Up and down capture are omitted: {stats.benchmark} rose on {stats.up_days} "
+            f"day(s) and fell on {stats.down_days}, and each side needs at least {MIN_CAPTURE_DAYS}."
+        )
+    return (
+        f"On the {stats.up_days} days {stats.benchmark} rose, {stats.ticker}'s average daily "
+        f"return was {stats.up_capture:.0%} of {stats.benchmark}'s (up capture). On the "
+        f"{stats.down_days} days {stats.benchmark} fell, it was {stats.down_capture:.0%} "
+        "(down capture)."
+    )
+
+
+def _beta_rule(label: str) -> str:
+    rules = {
+        "high": f"{BETA_HIGH:.2f} or above",
+        "low": f"zero to {BETA_LOW:.2f}",
+        "inverse": "below zero",
+        "market-like": f"between {BETA_LOW:.2f} and {BETA_HIGH:.2f}",
+    }
+    return rules[label]
+
+
+def _correlation_rule(value: float) -> str:
+    size = abs(value)
+    if size >= CORRELATION_STRONG:
+        return f"size {CORRELATION_STRONG:.2f} or above"
+    if size < CORRELATION_WEAK:
+        return f"size below {CORRELATION_WEAK:.2f}"
+    return f"size between {CORRELATION_WEAK:.2f} and {CORRELATION_STRONG:.2f}"
+
+
+def _relation(price: float, average: float) -> str:
+    if price > average:
+        return "above"
+    if price < average:
+        return "below"
+    return "equal to"
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _adjusted(frame: pd.DataFrame) -> pd.Series:
+    if "adj_close" not in frame.columns:
+        raise AnalysisError("The price frame has no adjusted close.")
+    series = frame["adj_close"].astype(float).sort_index()
+    series = series[~series.index.duplicated(keep="last")].dropna()
+    if (series <= 0).any():
+        raise AnalysisError("Adjusted closes must be positive.")
+    return series
+
+
+def _finite(values: pd.Series) -> pd.Series:
+    return pd.Series(values).astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def _excess_returns(returns: pd.Series, risk_free: float) -> pd.Series:
+    clean = _finite(returns)
+    if len(clean) < MIN_RETURNS_FOR_VOL:
+        raise AnalysisError(
+            f"A risk-adjusted ratio needs at least {MIN_RETURNS_FOR_VOL} daily returns."
+        )
+    return clean - daily_risk_free(risk_free)
+
+
+def _pairs(stock_returns: pd.Series, benchmark_returns: pd.Series, *, minimum: int = MIN_RETURNS_FOR_VOL) -> pd.DataFrame:
+    """Returns present on both sides, on the dates they share."""
+    frame = pd.concat(
+        {"stock": _finite(stock_returns), "benchmark": _finite(benchmark_returns)},
+        axis=1,
+        join="inner",
+    ).dropna()
+    if len(frame) < minimum:
+        raise AnalysisError(f"This calculation needs at least {minimum} paired daily return(s).")
+    return frame
+
+
+def _calendar_days(index: pd.Index) -> int:
+    if not isinstance(index, pd.DatetimeIndex):
+        raise AnalysisError("Calendar spans need dated prices.")
+    return int((index[-1] - index[0]).days)
+
+
+def _optional(calculation, *args, **kwargs):
+    """A figure this window cannot support is reported as missing, not as an error."""
+    try:
+        return calculation(*args, **kwargs)
+    except AnalysisError:
+        return None
+
+
+def _value_on(series: pd.Series, when: pd.Timestamp) -> float | None:
+    if when not in series.index or pd.isna(series.loc[when]):
+        return None
+    return float(series.loc[when])
 
 
 if __name__ == "__main__":
-    prices = load_prices("aapl_raw.csv")
-    feats = build_features(prices)
+    from data_loader import load_offline_history
 
-    print(f"Ticker:    {feats.attrs['ticker']}")
-    print(f"Rows:      {len(feats)}")
-    print(f"Columns:   {list(feats.columns)}")
-    print(f"\nLast 5 rows (rounded):")
-    print(feats.tail(5).round(4))
-
-    print(f"\nFeature summary:")
-    print(feats[["log_return",
-                 f"volatility_{feats.attrs['vol_window']}d",
-                 f"momentum_{feats.attrs['mom_window']}d"]].describe().round(4))
+    bundled = {symbol: load_offline_history(symbol) for symbol in ("AAPL", "MSFT", "SPY")}
+    start, end = window_for_preset(bundled["AAPL"].frame.index, "Max")
+    reports = {
+        symbol: build_period(
+            bundled[symbol].frame,
+            ticker=symbol,
+            start=start,
+            end=end,
+            benchmark=bundled["SPY"].frame,
+            benchmark_ticker="SPY",
+        )
+        for symbol in ("AAPL", "MSFT")
+    }
+    spy_report = build_period(bundled["SPY"].frame, ticker="SPY", start=start, end=end)
+    comparison = build_comparison(reports, spy_report)
+    for sentence in reports["AAPL"].sentences:
+        print(sentence)
+    print("---")
+    for sentence in comparison.sentences:
+        print(sentence)
+    print("---")
+    print(comparison_table(comparison).round(3).to_string())

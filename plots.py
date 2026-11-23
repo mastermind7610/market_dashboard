@@ -1,244 +1,471 @@
 """
-plots.py — THE PLOT LAYER  (Step 3b: with polish)
-================================================================
-Same 2x2 dashboard as before, plus three pieces of polish:
-    - colorbar on the scatter
-    - custom size legend (matplotlib won't auto-build one)
-    - event annotations on the price chart
-
-TODOs 1-4 are PRE-FILLED with your working code from Step 3a.
-TODOs 5-8 are the new learning blanks for this step.
+plots.py — THE PLOT LAYER
+==========================
+Interactive Plotly charts. This module does not read files and does not
+compute returns. It draws the series the feature layer hands it.
+Zooming a chart, or pressing one of its range buttons, changes the view
+only. The numbers in the briefing still describe the selected window.
 """
 
 from __future__ import annotations
-import matplotlib.pyplot as plt
-import numpy as np
+
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# ---- Styling constants ------------------------------------------------------
-FIGSIZE = (14, 9)
-PRICE_COLOR = "steelblue"
-RETURN_COLOR = "gray"
-VOL_COLOR = "darkorange"
-SCATTER_CMAP = "RdYlGn"
+COLOR_PRICE = "#1f4b99"
+COLOR_MA_SHORT = "#d97706"
+COLOR_MA_LONG = "#64748b"
+COLOR_BENCH = "#334155"
+COLOR_DRAWDOWN = "#b45309"
+COLOR_VOL = "#1f4b99"
+COLOR_UP = "#15803d"
+COLOR_DOWN = "#b91c1c"
+COLOR_REFERENCE = "#94a3b8"
+# One colour per compared symbol, in selection order. The benchmark is
+# always the dashed slate line, so a symbol never shares its colour.
+SERIES_COLORS = ("#1f4b99", "#d97706", "#7c3aed", "#be123c", "#0891b2")
+# Red below zero, white at zero, green above. Monthly returns read as a calendar.
+HEATMAP_SCALE = ((0.0, "#b91c1c"), (0.5, "#ffffff"), (1.0, "#15803d"))
+GRID = "#e6ebf2"
+INK = "#1c2430"
+FONT = "Segoe UI, Helvetica Neue, Arial, sans-serif"
+
+CHART_HEIGHT = 480
+CANDLE_HEIGHT = 580
+CANDLE_ROW_HEIGHTS = (0.74, 0.26)
+HEATMAP_BASE_HEIGHT = 170
+HEATMAP_ROW_HEIGHT = 34
+HISTOGRAM_BINS = 50
+FOCUS_LINE_WIDTH = 2.6
+LINE_WIDTH = 1.8
+MONTH_LABELS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# Range buttons that jump the view. A button longer than the data on
+# the chart would do nothing, so each chart keeps only the shorter ones.
+_RANGE_STEPS = (
+    ("1M", 31, dict(count=1, step="month", stepmode="backward")),
+    ("3M", 92, dict(count=3, step="month", stepmode="backward")),
+    ("6M", 183, dict(count=6, step="month", stepmode="backward")),
+    ("YTD", 0, dict(count=1, step="year", stepmode="todate")),
+    ("1Y", 366, dict(count=1, step="year", stepmode="backward")),
+    ("5Y", 1827, dict(count=5, step="year", stepmode="backward")),
+)
+
+PLOTLY_CONFIG = {
+    "scrollZoom": True,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+}
 
 
-# ---- Figure scaffolding (DONE) ---------------------------------------------
-def setup_figure() -> tuple[plt.Figure, np.ndarray]:
-    fig, axes = plt.subplots(2, 2, figsize=FIGSIZE)
-    fig.suptitle("Market Dashboard", fontsize=16, fontweight="bold", y=0.995)
-    return fig, axes
+def price_chart(
+    price: pd.Series,
+    ma_short: pd.Series,
+    ma_long: pd.Series,
+    *,
+    ticker: str,
+    short_window: int,
+    long_window: int,
+) -> go.Figure:
+    """Adjusted close with the two simple moving averages. Rangeslider on."""
+    figure = _figure(f"{ticker} adjusted close")
+    _add_line(figure, price, ticker, COLOR_PRICE, width=2.2, hover="Adjusted close")
+    _add_line(figure, ma_short, f"{short_window}-day average", COLOR_MA_SHORT, width=1.4, hover="Average")
+    _add_line(figure, ma_long, f"{long_window}-day average", COLOR_MA_LONG, width=1.4, hover="Average")
+    figure.update_layout(xaxis_rangeslider_visible=True, yaxis_title="Adjusted close")
+    _add_range_buttons(figure, price.index)
+    return figure
 
 
-# ---- Plot 1: Price trend (TODO #1 filled) ----------------------------------
-def plot_price(ax: plt.Axes, df: pd.DataFrame) -> None:
-    ax.set_title(f"{df.attrs.get('ticker', '?')} Close Price", fontweight="bold")
-    ax.set_ylabel("Price (USD)")
-    ax.grid(True, alpha=0.3)
-    ax.plot(df.index, df["close"], color=PRICE_COLOR, linewidth=1.5)
-
-
-# ---- Plot 2: Daily returns (TODO #2 filled) --------------------------------
-def plot_returns(ax: plt.Axes, df: pd.DataFrame) -> None:
-    ax.set_title("Daily Log Returns", fontweight="bold")
-    ax.set_ylabel("log return")
-    ax.grid(True, alpha=0.3)
-    ax.plot(df.index, df["log_return"], color=RETURN_COLOR, linewidth=0.8)
-    ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.5)
-
-
-# ---- Plot 3: Volatility (TODO #3 filled) -----------------------------------
-def plot_volatility(ax: plt.Axes, df: pd.DataFrame) -> None:
-    vol_window = df.attrs.get("vol_window", 21)
-    vol_col = f"volatility_{vol_window}d"
-    ax.set_title(f"Rolling {vol_window}-Day Annualized Volatility", fontweight="bold")
-    ax.set_ylabel("annualized σ")
-    ax.grid(True, alpha=0.3)
-    ax.plot(df.index, df[vol_col], color=VOL_COLOR, linewidth=1.5)
-
-
-# ---- Plot 4: Scatter (TODO #4 filled, now returns sc) ----------------------
-def plot_scatter(ax: plt.Axes, df: pd.DataFrame):
-    """Returns the scatter handle so the colorbar can attach to it."""
-    vol_window = df.attrs.get("vol_window", 21)
-    mom_window = df.attrs.get("mom_window", 63)
-    vol_col = f"volatility_{vol_window}d"
-    mom_col = f"momentum_{mom_window}d"
-
-    ax.set_title("Return vs Volatility (color = momentum, size = |return|)",
-                 fontweight="bold")
-    ax.set_xlabel(f"{vol_window}d annualized volatility")
-    ax.set_ylabel("daily log return")
-    ax.grid(True, alpha=0.3)
-    ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.5)
-
-    sub = df[[vol_col, "log_return", mom_col]].dropna()
-
-    sc = ax.scatter(
-        x=sub[vol_col],
-        y=sub["log_return"],
-        c=sub[mom_col],
-        s=sub["log_return"].abs() * 800,
-        cmap=SCATTER_CMAP,
-        alpha=0.6,
-        edgecolors="black",
-        linewidths=0.3,
+def candlestick_chart(
+    ohlc: pd.DataFrame,
+    ma_short: pd.Series,
+    ma_long: pd.Series,
+    *,
+    ticker: str,
+    short_window: int,
+    long_window: int,
+) -> go.Figure:
+    """
+    Daily candles on the adjusted scale, the two averages, and volume
+    underneath. Weekends are cut out of the axis so candles sit side by
+    side. Exchange holidays still leave a one-bar gap.
+    """
+    figure = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=list(CANDLE_ROW_HEIGHTS),
     )
-    return sc
+    figure.add_trace(
+        go.Candlestick(
+            x=ohlc.index,
+            open=ohlc["open"],
+            high=ohlc["high"],
+            low=ohlc["low"],
+            close=ohlc["close"],
+            name=ticker,
+            increasing_line_color=COLOR_UP,
+            decreasing_line_color=COLOR_DOWN,
+        ),
+        row=1,
+        col=1,
+    )
+    for series, window, color in ((ma_short, short_window, COLOR_MA_SHORT), (ma_long, long_window, COLOR_MA_LONG)):
+        clean = series.dropna()
+        figure.add_trace(
+            go.Scatter(
+                x=clean.index,
+                y=clean.to_numpy(),
+                name=f"{window}-day average",
+                mode="lines",
+                line=dict(color=color, width=1.4),
+                hovertemplate="%{y:.2f}",
+            ),
+            row=1,
+            col=1,
+        )
+    rising = ohlc["close"] >= ohlc["open"]
+    figure.add_trace(
+        go.Bar(
+            x=ohlc.index,
+            y=ohlc["volume"],
+            name="Volume",
+            marker_color=[COLOR_UP if up else COLOR_DOWN for up in rising],
+            marker_line_width=0,
+            opacity=0.55,
+            hovertemplate="%{y:,.0f}",
+        ),
+        row=2,
+        col=1,
+    )
+    _style(figure, f"{ticker} daily candles and volume", height=CANDLE_HEIGHT)
+    figure.update_layout(xaxis_rangeslider_visible=False, showlegend=True)
+    figure.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    figure.update_yaxes(title_text="Adjusted price", row=1, col=1)
+    figure.update_yaxes(title_text="Volume", row=2, col=1)
+    _add_range_buttons(figure, ohlc.index)
+    return figure
 
 
-# ============================================================================
-# STEP 3b POLISH LAYER — three new TODOs below
-# ============================================================================
+def drawdown_chart(
+    drawdown: pd.Series,
+    *,
+    ticker: str,
+    benchmark_drawdown: pd.Series | None = None,
+    benchmark: str | None = None,
+) -> go.Figure:
+    """Underwater chart of close-to-prior-peak declines inside the window."""
+    figure = _figure(f"{ticker} drawdown from the prior peak")
+    figure.add_trace(
+        go.Scatter(
+            x=drawdown.index,
+            y=drawdown.to_numpy(),
+            name=ticker,
+            mode="lines",
+            line=dict(color=COLOR_DRAWDOWN, width=1.6),
+            fill="tozeroy",
+            fillcolor="rgba(180, 83, 9, 0.18)",
+            hovertemplate="%{x|%Y-%m-%d}<br>Drawdown: %{y:.1%}<extra>" + ticker + "</extra>",
+        )
+    )
+    if benchmark_drawdown is not None and benchmark:
+        figure.add_trace(
+            go.Scatter(
+                x=benchmark_drawdown.index,
+                y=benchmark_drawdown.to_numpy(),
+                name=benchmark,
+                mode="lines",
+                line=dict(color=COLOR_BENCH, width=1.4, dash="dash"),
+                hovertemplate="%{x|%Y-%m-%d}<br>Drawdown: %{y:.1%}<extra>" + benchmark + "</extra>",
+            )
+        )
+    figure.update_layout(yaxis_title="Decline from peak", yaxis_tickformat=".0%")
+    _add_range_buttons(figure, drawdown.index)
+    return figure
 
 
-def add_colorbar(fig: plt.Figure, ax: plt.Axes, scatter_handle, label: str) -> None:
+def comparison_chart(
+    rebased: pd.DataFrame | None,
+    *,
+    benchmark: str | None = None,
+    focus: str | None = None,
+) -> go.Figure | None:
     """
-    Attach a colorbar to the scatter plot so the reader knows what the
-    color gradient actually means (red = negative momentum, green = positive).
-    Without a colorbar, the colors are decoration. With one, they're a scale.
+    One line per column of ``rebased``, which the feature layer has
+    already set to 100 on the first shared session. The benchmark is
+    dashed. The symbol in focus is drawn thicker.
     """
-    # TODO #5 ----------------------------------------------------------------
-    # Use fig.colorbar(...). It needs:
-    #   - the scatter handle (first positional argument)
-    #   - ax=ax           — tells it which subplot to attach next to
-    #   - shrink=0.85     — makes the bar 85% the height of the subplot
-    #   - pad=0.02        — small gap between subplot and bar
-    #
-    # Save the return value into a variable named `cbar`. We'll then
-    # call two methods on it:
-    #   cbar.set_label(label, fontsize=9)
-    #   cbar.ax.tick_params(labelsize=8)
-    #
-    # If you get stuck, paste this into Claude Code:
-    #   @plots.py I'm on TODO #5 — adding a colorbar. Don't write the
-    #   code. Just confirm: which matplotlib function attaches a
-    #   colorbar to a figure given a scatter handle?
-    # ------------------------------------------------------------------------
-    cbar = fig.colorbar(scatter_handle, ax=ax, shrink=0.85, pad=0.02)
-    cbar.set_label(label, fontsize=9)
-    cbar.ax.tick_params(labelsize=8)
+    if rebased is None or len(rebased) < 2:
+        return None
+    symbols = [column for column in rebased.columns if column != benchmark]
+    names = ", ".join(symbols) + (f" and {benchmark}" if benchmark in rebased.columns else "")
+    figure = _figure(f"{names}, rebased to 100")
+    for position, symbol in enumerate(symbols):
+        color = SERIES_COLORS[position % len(SERIES_COLORS)]
+        width = FOCUS_LINE_WIDTH if symbol == focus else LINE_WIDTH
+        _add_line(figure, rebased[symbol], symbol, color, width=width, hover="Index")
+    if benchmark in rebased.columns:
+        _add_line(figure, rebased[benchmark], benchmark, COLOR_BENCH, width=LINE_WIDTH, hover="Index", dash="dash")
+    figure.add_hline(y=100.0, line_color=COLOR_REFERENCE, line_width=1, line_dash="dot")
+    figure.update_layout(yaxis_title="Rebased to 100 on the first shared session")
+    _add_range_buttons(figure, rebased.index)
+    return figure
 
 
-def add_size_legend(ax: plt.Axes) -> None:
+def volatility_chart(
+    rolling: pd.Series,
+    *,
+    ticker: str,
+    window: int,
+    period_vol: float | None,
+) -> go.Figure:
+    """Rolling annualized volatility, with the window's own vol as a line."""
+    figure = _figure(f"{ticker} rolling {window}-day annualized volatility")
+    clean = rolling.dropna()
+    figure.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=clean.to_numpy(),
+            name=f"{window}-day vol",
+            mode="lines",
+            line=dict(color=COLOR_VOL, width=1.8),
+            hovertemplate="%{x|%Y-%m-%d}<br>Annualized vol: %{y:.1%}<extra></extra>",
+        )
+    )
+    if period_vol is not None:
+        figure.add_hline(
+            y=period_vol,
+            line_dash="dash",
+            line_color="#b45309",
+            annotation_text=f"Window vol {period_vol:.1%}",
+            annotation_position="top left",
+        )
+    figure.update_layout(yaxis_title="Annualized volatility", yaxis_tickformat=".0%")
+    return figure
+
+
+def rolling_relationship_chart(
+    rolling_beta: pd.Series | None,
+    rolling_correlation: pd.Series | None,
+    *,
+    ticker: str,
+    benchmark: str,
+    window: int,
+) -> go.Figure | None:
     """
-    Build a manual legend showing what the dot sizes mean. matplotlib's
-    default legend handles COLOR encoding automatically, but for SIZE
-    encoding we have to create 'proxy' markers — fake scatter points
-    with no data, just visible as legend swatches.
+    Trailing beta and trailing correlation against the benchmark on one
+    axis. The dotted lines mark beta 1 (moves like the benchmark) and 0.
     """
-    sample_returns = [0.005, 0.02, 0.05]              # 0.5%, 2%, 5% magnitude
-    labels = ["|r| = 0.5%", "|r| = 2%", "|r| = 5%"]
-
-    handles = []
-    for r, lbl in zip(sample_returns, labels):
-        # TODO #6 ------------------------------------------------------------
-        # Create one proxy scatter point per size. The trick: call
-        # ax.scatter([], [], ...) — empty x/y means NO data is plotted,
-        # but the legend still gets a swatch.
-        #
-        # Use these arguments:
-        #   [], []                          — empty data
-        #   s = r * 800                     — SAME 800 magnification as the real scatter
-        #   color = "gray"                  — neutral color since we're not encoding momentum here
-        #   alpha = 0.6
-        #   edgecolors = "black"
-        #   linewidths = 0.3
-        #   label = lbl                     — the legend text
-        #
-        # Save the return value into a variable named `h` and append
-        # it to handles (do `handles.append(h)`).
-        #
-        # Stuck? Ask Claude Code:
-        #   @plots.py I'm on TODO #6. Without writing it, confirm: how
-        #   do I create a scatter marker that appears in a legend but
-        #   plots no actual data?
-        # --------------------------------------------------------------------
-        h = ax.scatter([], [], s=r * 800, color="gray", alpha=0.6, edgecolors="black", linewidths=0.3, label=lbl)
-        handles.append(h)
-
-    # TODO #7 ----------------------------------------------------------------
-    # Now actually attach the legend to the chart. Call ax.legend(...) with:
-    #   handles = handles
-    #   title = "dot size"
-    #   loc = "upper left"
-    #   fontsize = 8
-    #   title_fontsize = 8
-    #   framealpha = 0.9
-    #   labelspacing = 1.2
-    # ------------------------------------------------------------------------
-    ax.legend(handles=handles, title="dot size", loc="upper left", fontsize=8, title_fontsize=8, framealpha=0.9, labelspacing=1.2)
+    if rolling_beta is None or rolling_correlation is None:
+        return None
+    if rolling_beta.dropna().empty or rolling_correlation.dropna().empty:
+        return None
+    figure = _figure(f"{ticker} versus {benchmark}: rolling {window}-day beta and correlation")
+    _add_line(figure, rolling_beta, "Beta", COLOR_PRICE, width=2.0, hover="Beta")
+    _add_line(figure, rolling_correlation, "Correlation", COLOR_MA_SHORT, width=1.8, hover="Correlation")
+    figure.add_hline(y=1.0, line_color=COLOR_REFERENCE, line_width=1, line_dash="dot")
+    figure.add_hline(y=0.0, line_color=COLOR_REFERENCE, line_width=1, line_dash="dot")
+    figure.update_layout(yaxis_title="Beta and correlation")
+    return figure
 
 
-def add_event_annotations(ax_price: plt.Axes, df: pd.DataFrame) -> None:
+def return_histogram(
+    returns: pd.Series,
+    *,
+    ticker: str,
+    benchmark_returns: pd.Series | None = None,
+    benchmark: str | None = None,
+) -> go.Figure:
     """
-    Add arrows + text labels on the price chart pointing at specific dates.
-    Anchors the abstract wiggles to real-world events the reader can recall.
+    How often each size of daily move happened. The benchmark's moves
+    are drawn behind in the same bins, so a wider stock shape reads as
+    wider at a glance. The dashed line is the stock's mean daily return.
     """
-    events = [
-        ("2015-08-24", "China shock\n(Aug '15)", 25),
-        ("2016-09-09", "iPhone 7 launch\n(Sep '16)", 20),
-    ]
+    figure = _figure(f"{ticker} daily returns")
+    clean = returns.dropna()
+    if benchmark_returns is not None and benchmark:
+        figure.add_trace(
+            go.Histogram(
+                x=benchmark_returns.dropna(),
+                name=benchmark,
+                nbinsx=HISTOGRAM_BINS,
+                bingroup="daily",
+                marker_color=COLOR_BENCH,
+                opacity=0.35,
+                hovertemplate="%{x}<br>" + benchmark + " days: %{y}<extra></extra>",
+            )
+        )
+    figure.add_trace(
+        go.Histogram(
+            x=clean,
+            name=ticker,
+            nbinsx=HISTOGRAM_BINS,
+            bingroup="daily",
+            marker_color=COLOR_PRICE,
+            opacity=0.75,
+            hovertemplate="%{x}<br>" + ticker + " days: %{y}<extra></extra>",
+        )
+    )
+    if not clean.empty:
+        mean = float(clean.mean())
+        figure.add_vline(
+            x=mean,
+            line_dash="dash",
+            line_color=COLOR_MA_SHORT,
+            annotation_text=f"Mean {mean:+.2%}",
+            annotation_position="top right",
+        )
+    figure.update_layout(
+        barmode="overlay",
+        hovermode="closest",
+        xaxis_title="Daily simple return",
+        xaxis_tickformat=".1%",
+        yaxis_title="Number of days",
+    )
+    return figure
 
-    for date_str, label, y_offset in events:
-        target = pd.Timestamp(date_str)
-        # Snap to nearest actual trading day (markets close on weekends).
-        idx_pos = df.index.get_indexer([target], method="nearest")[0]
-        actual_date = df.index[idx_pos]
-        price = df.loc[actual_date, "close"]
 
-        # TODO #8 ------------------------------------------------------------
-        # Use ax_price.annotate(...) with:
-        #   label                        — first positional, the text to show
-        #   xy = (actual_date, price)    — where the ARROW POINT lands
-        #   xytext = (actual_date, price + y_offset)
-        #                                — where the TEXT BOX sits (above the point)
-        #   arrowprops = dict(arrowstyle="->", color="black", lw=0.8)
-        #   fontsize = 8
-        #   ha = "center"                — horizontal alignment of text
-        #   bbox = dict(boxstyle="round,pad=0.3", facecolor="white",
-        #               edgecolor="gray", alpha=0.9)
-        #
-        # The structure: a text label PLUS an arrow connecting the label
-        # to the data point. xy=where the arrow points, xytext=where the
-        # text sits.
-        #
-        # Claude Code prompt if stuck:
-        #   @plots.py I'm on TODO #8 — annotating dates on a price chart.
-        #   Don't write code. Just explain: in ax.annotate(), what's the
-        #   difference between `xy` and `xytext`?
-        # --------------------------------------------------------------------
-        ax_price.annotate(label, xy=(actual_date, price), xytext=(actual_date, price + y_offset), arrowprops=dict(arrowstyle="->", color="black", lw=0.8), fontsize=8, ha="center", bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="gray", alpha=0.9))
-
-# ---- Orchestrator (DONE) ---------------------------------------------------
-def build_dashboard(df: pd.DataFrame) -> plt.Figure:
+def monthly_heatmap(table: pd.DataFrame, *, ticker: str) -> go.Figure:
     """
-    Wires the four base plots PLUS the three polish helpers.
+    Years down the side, months across, one coloured cell per monthly
+    return. The colour scale is symmetric, so white is always zero.
     """
-    fig, axes = setup_figure()
-    plot_price(axes[0, 0], df)
-    plot_returns(axes[0, 1], df)
-    plot_volatility(axes[1, 0], df)
-    sc = plot_scatter(axes[1, 1], df)
+    values = table.to_numpy(dtype=float)
+    labels = [["" if pd.isna(value) else f"{value:+.1%}" for value in row] for row in values]
+    bound = float(pd.DataFrame(values).abs().max().max()) if table.size else 0.0
+    figure = go.Figure(
+        go.Heatmap(
+            z=values,
+            x=list(MONTH_LABELS),
+            y=[str(year) for year in table.index],
+            text=labels,
+            texttemplate="%{text}",
+            colorscale=[list(stop) for stop in HEATMAP_SCALE],
+            zmid=0.0,
+            zmin=-bound,
+            zmax=bound,
+            xgap=3,
+            ygap=3,
+            hoverongaps=False,
+            # Every cell prints its own figure, so a colour bar would only repeat it.
+            showscale=False,
+            hovertemplate="%{x} %{y}<br>Return: %{text}<extra></extra>",
+        )
+    )
+    _style(
+        figure,
+        f"{ticker} monthly returns",
+        height=HEATMAP_BASE_HEIGHT + HEATMAP_ROW_HEIGHT * max(len(table.index), 1),
+    )
+    figure.update_layout(hovermode="closest")
+    figure.update_xaxes(showgrid=False, side="top", ticks="")
+    figure.update_yaxes(showgrid=False, autorange="reversed", type="category", ticks="")
+    return figure
 
-    # NEW for Step 3b — these three calls turn a working chart into a
-    # readable one. They will do nothing until you fill in the TODOs.
-    mom_window = df.attrs.get("mom_window", 63)
-    add_colorbar(fig, axes[1, 1], sc, label=f"{mom_window}d momentum")
-    add_size_legend(axes[1, 1])
-    add_event_annotations(axes[0, 0], df)
 
-    fig.tight_layout()
-    return fig
+def _figure(title: str) -> go.Figure:
+    figure = go.Figure()
+    _style(figure, title, height=CHART_HEIGHT)
+    return figure
 
 
-# ---- Self-test -------------------------------------------------------------
+def _style(figure: go.Figure, title: str, *, height: int) -> None:
+    """One look for every chart: white panel, left title, legend under it."""
+    figure.update_layout(
+        title=dict(text=title, x=0, xanchor="left", font=dict(size=18, color=INK)),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        hovermode="x unified",
+        margin=dict(l=56, r=24, t=96, b=48),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        font=dict(family=FONT, color=INK, size=13),
+        height=height,
+    )
+    figure.update_xaxes(showgrid=True, gridcolor=GRID, zeroline=False)
+    figure.update_yaxes(showgrid=True, gridcolor=GRID, zeroline=False)
+
+
+def _add_range_buttons(figure: go.Figure, index: pd.Index) -> None:
+    """Quick-zoom buttons above the plot, right-aligned so the legend keeps the left."""
+    if len(index) < 2:
+        return
+    span_days = (index[-1] - index[0]).days
+    starts_before_january = index[0].year < index[-1].year
+    buttons = []
+    for label, minimum_days, step in _RANGE_STEPS:
+        fits = starts_before_january if label == "YTD" else span_days > minimum_days
+        if fits:
+            buttons.append(dict(label=label, **step))
+    if not buttons:
+        return
+    buttons.append(dict(label="All", step="all"))
+    figure.update_xaxes(
+        rangeselector=dict(
+            buttons=buttons,
+            x=1,
+            xanchor="right",
+            y=1.02,
+            yanchor="bottom",
+            bgcolor="#eef2f7",
+            activecolor="#c7d6ee",
+            font=dict(size=12),
+        ),
+        row=1 if _has_subplots(figure) else None,
+        col=1 if _has_subplots(figure) else None,
+    )
+
+
+def _has_subplots(figure: go.Figure) -> bool:
+    return getattr(figure, "_grid_ref", None) is not None
+
+
+def _add_line(
+    figure: go.Figure,
+    series: pd.Series,
+    name: str,
+    color: str,
+    *,
+    width: float,
+    hover: str,
+    dash: str | None = None,
+) -> None:
+    clean = series.dropna()
+    figure.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=clean.to_numpy(),
+            name=name,
+            mode="lines",
+            line=dict(color=color, width=width, dash=dash),
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>{hover}: %{{y:.2f}}<extra>{name}</extra>",
+        )
+    )
+
+
 if __name__ == "__main__":
-    from data_loader import load_prices
-    from features import build_features
-
-    prices = load_prices("aapl_raw.csv")
-    feats = build_features(prices)
-    fig = build_dashboard(feats)
-    fig.savefig("dashboard.png", dpi=120, bbox_inches="tight")
-    print("Saved dashboard.png")
+    # A drawn-by-hand series is enough to prove every chart builds. Real
+    # prices arrive through dashboard.py, which is the only orchestrator.
+    dates = pd.bdate_range("2024-01-02", periods=300)
+    wave = pd.Series([100.0 + (step % 17) - 0.02 * step for step in range(300)], index=dates)
+    bars = pd.DataFrame(
+        {"open": wave, "high": wave + 1.0, "low": wave - 1.0, "close": wave + 0.5, "volume": 1_000.0},
+        index=dates,
+    )
+    moves = wave / wave.shift(1) - 1.0
+    months = pd.DataFrame([[0.01 * month for month in range(1, 13)]], index=[2024], columns=range(1, 13))
+    lines = pd.DataFrame({"DEMO": wave, "BENCH": wave * 0.9}, index=dates)
+    built = {
+        "price": price_chart(wave, wave.rolling(20).mean(), wave.rolling(60).mean(), ticker="DEMO", short_window=20, long_window=60),
+        "candles": candlestick_chart(bars, wave.rolling(20).mean(), wave.rolling(60).mean(), ticker="DEMO", short_window=20, long_window=60),
+        "drawdown": drawdown_chart(wave / wave.cummax() - 1.0, ticker="DEMO"),
+        "comparison": comparison_chart(lines / lines.iloc[0] * 100.0, benchmark="BENCH", focus="DEMO"),
+        "volatility": volatility_chart(moves.rolling(21).std(), ticker="DEMO", window=21, period_vol=0.2),
+        "relationship": rolling_relationship_chart(moves.rolling(63).mean(), moves.rolling(63).mean(), ticker="DEMO", benchmark="BENCH", window=63),
+        "histogram": return_histogram(moves, ticker="DEMO"),
+        "heatmap": monthly_heatmap(months, ticker="DEMO"),
+    }
+    for name, chart in built.items():
+        print(f"{name}: {len(chart.data)} trace(s)")

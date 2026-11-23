@@ -1,0 +1,883 @@
+"""
+app.py — the briefing a person actually uses.
+
+The sidebar collects up to five symbols, a benchmark, and the chart
+settings. The page collects the date range and which symbol is in
+focus, then shows the numbers, the sentences those numbers produce, the
+side-by-side table, and the charts. This file does not calculate
+returns. Offline mode is an explicit choice and reads only the bundled
+files.
+
+Every control that changes the view is bound to a URL query parameter,
+so the address bar always describes what is on screen and a copied link
+reopens the same view.
+"""
+
+from __future__ import annotations
+
+import html
+from datetime import date, timedelta
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+
+import streamlit as st
+
+from dashboard import (
+    BENCHMARK_CHOICES,
+    DEFAULT_BENCHMARK,
+    DEFAULT_PRESET,
+    DEFAULT_TICKER,
+    MAX_SYMBOLS,
+    run_briefing,
+)
+from data_loader import (
+    CACHE_TTL_HOURS,
+    OFFLINE_BENCHMARKS,
+    MarketDataError,
+    filter_offline_selection,
+    offline_span,
+    offline_symbols,
+    search_symbols,
+)
+from features import (
+    DEFAULT_RISK_FREE,
+    MA_LONG,
+    MA_SHORT,
+    MAX_MA_WINDOW,
+    MIN_MA_WINDOW,
+    MISSING,
+    PRESETS,
+    RISK_FREE_MAX,
+    RISK_FREE_MIN,
+    ROLLING_BETA_WINDOW,
+    ROLLING_VOL_WINDOW,
+    TABLE_FORMATS,
+    AnalysisError,
+    comparison_table,
+    format_cell,
+    metric_help,
+    methodology_notes,
+    volatility_rule_text,
+)
+from plots import PLOTLY_CONFIG
+
+# The option text is also the value a shared link carries (?data=Offline),
+# because a bound widget writes what it displays.
+LIVE = "Live"
+OFFLINE = "Offline"
+MODE_CAPTIONS = ("Yahoo Finance prices", "Bundled demo files, no network")
+CUSTOM = "Custom"
+RANGE_OPTIONS = (*PRESETS, CUSTOM)
+LINE = "Line"
+CANDLES = "Candlestick"
+TABS = ("Compare", "Price", "Drawdown", "Risk", "Returns")
+# Suggestions only. In live mode any Yahoo Finance ticker can be typed.
+POPULAR = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM", "JNJ", "KO", "BRK-B")
+PERCENT = 100.0
+RISK_FREE_STEP = 0.25
+DEFAULT_CUSTOM_DAYS = 365
+EARLIEST_PICKABLE = date(1970, 1, 1)
+BOUND = "query-params"
+# Streamlit Community Cloud draws its own header bar, 3.75rem tall, over
+# the top of the page. Content has to start below it or the first line
+# (the small label above the title) is covered on the hosted app while
+# looking fine locally, where the bar is transparent.
+CLOUD_HEADER_REM = 3.75
+TOP_PADDING_REM = CLOUD_HEADER_REM + 0.5
+# Widget keys double as the query-parameter names in a shared link.
+SELECTION_KEYS = ("symbols", "benchmark", "focus", "start", "end")
+
+PAGE_CSS = """
+<style>
+    .block-container {padding-top: TOP_PADDING; padding-bottom: 3rem; max-width: 1180px;}
+    h1 {font-weight: 650; letter-spacing: -0.03em; margin-bottom: 0.15rem; padding-top: 0.1rem;}
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e4e8ee;
+        border-radius: 12px;
+        padding: 0.75rem 0.9rem 0.55rem 0.9rem;
+        box-shadow: 0 1px 2px rgba(28, 36, 48, 0.04);
+    }
+    div[data-testid="stMetricValue"] {font-variant-numeric: tabular-nums;}
+    .kicker {
+        color: #1f4b99;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        margin-bottom: 0.2rem;
+    }
+    .status-card {
+        background: #ffffff;
+        border: 1px solid #e4e8ee;
+        border-radius: 12px;
+        padding: 0.7rem 0.95rem;
+        margin: 0.4rem 0 1rem 0;
+        color: #3c4756;
+        font-size: 0.9rem;
+        line-height: 1.5;
+    }
+    .status-card .muted {color: #5c6b7a;}
+    .summary-card {
+        background: #ffffff;
+        border-left: 4px solid #1f4b99;
+        border-radius: 0 12px 12px 0;
+        padding: 0.3rem 1rem 0.6rem 1rem;
+        margin: 0.4rem 0 0.8rem 0;
+    }
+    .compare-wrap {
+        background: #ffffff;
+        border: 1px solid #e4e8ee;
+        border-radius: 12px;
+        overflow-x: auto;
+        margin: 0.4rem 0 0.5rem 0;
+    }
+    table.compare {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.86rem;
+        font-variant-numeric: tabular-nums;
+    }
+    table.compare th, table.compare td {
+        padding: 0.5rem 0.7rem;
+        text-align: right;
+        white-space: nowrap;
+        border: none;
+        border-bottom: 1px solid #eef1f5;
+    }
+    table.compare thead th {
+        color: #5c6b7a;
+        font-weight: 600;
+        font-size: 0.76rem;
+        background: #f8fafc;
+        white-space: normal;
+        vertical-align: bottom;
+    }
+    table.compare th:first-child {text-align: left;}
+    table.compare tbody tr:last-child th, table.compare tbody tr:last-child td {border-bottom: none;}
+    table.compare tr.focus th, table.compare tr.focus td {background: #eef4ff;}
+    div[data-testid="stTabs"] {margin-top: 0.4rem;}
+</style>
+""".replace("TOP_PADDING", f"{TOP_PADDING_REM}rem")
+
+
+# ---------------------------------------------------------------------------
+# Sidebar: what to load
+# ---------------------------------------------------------------------------
+
+
+def _on_data_mode_change() -> None:
+    """
+    Live and offline offer different symbols and dates.
+
+    Switching to Offline keeps what the offline demo can serve and
+    records a notice naming anything that was dropped, including a
+    benchmark that is not SPY or QQQ. Switching to Live clears that
+    notice and leaves the current selection alone.
+    """
+    for key in ("focus", "start", "end"):
+        st.session_state.pop(key, None)
+    if st.session_state.get("data") != OFFLINE:
+        st.session_state.pop("offline_drop_notes", None)
+        st.session_state.pop("offline_intent_symbols", None)
+        st.session_state.pop("offline_intent_benchmark", None)
+        return
+    requested = list(st.session_state.get("symbols") or [])
+    requested.extend(_symbols_named_in_query())
+    benchmark = (
+        st.session_state.get("benchmark")
+        or _benchmark_named_in_query()
+        or DEFAULT_BENCHMARK
+    )
+    kept, bench, notes = filter_offline_selection(requested, benchmark)
+    st.session_state.symbols = kept
+    st.session_state.benchmark = bench
+    st.session_state.offline_drop_notes = list(notes)
+
+
+def _capture_offline_intent() -> None:
+    """
+    Remember symbols and benchmark named in the URL before the offline
+    widgets drop values they cannot hold. Bound widgets remove unknown
+    options from the query string during the run; reading first keeps
+    enough to name what was left out.
+    """
+    mode = st.query_params.get("data") or st.session_state.get("data")
+    if mode != OFFLINE:
+        return
+    if st.session_state.get("offline_intent_captured"):
+        return
+    symbols = _symbols_named_in_query()
+    bench = _benchmark_named_in_query()
+    if symbols:
+        st.session_state.offline_intent_symbols = symbols
+    if bench:
+        st.session_state.offline_intent_benchmark = bench
+    st.session_state.offline_intent_captured = True
+
+
+def _symbols_named_in_query() -> list[str]:
+    """Symbols named in the query string, including ones offline will refuse."""
+    values = list(st.query_params.get_all("symbols") or [])
+    address = st.context.url or ""
+    if address:
+        values.extend(parse_qs(urlsplit(address).query).get("symbols", []))
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value).strip().upper()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _benchmark_named_in_query() -> str | None:
+    value = st.query_params.get("benchmark")
+    if value:
+        text = str(value).strip().upper()
+        if text:
+            return text
+    address = st.context.url or ""
+    if not address:
+        return None
+    values = parse_qs(urlsplit(address).query).get("benchmark", [])
+    if not values:
+        return None
+    text = str(values[0]).strip().upper()
+    return text or None
+
+
+def _apply_offline_filter(symbols: list[str], benchmark: str) -> tuple[list[str], str, tuple[str, ...]]:
+    """
+    Drop symbols (and a benchmark) the offline demo cannot serve, and
+    remember the notice for the main page. Uses the URL intent captured
+    before widgets ran, so a link that names NVDA still produces a message.
+    """
+    requested = list(
+        dict.fromkeys(
+            [
+                *[str(s).strip().upper() for s in symbols if str(s).strip()],
+                *list(st.session_state.get("offline_intent_symbols") or []),
+                *_symbols_named_in_query(),
+            ]
+        )
+    )
+    intent_bench = st.session_state.get("offline_intent_benchmark")
+    kept, bench, notes = filter_offline_selection(
+        requested, intent_bench or _benchmark_named_in_query() or benchmark
+    )
+    previous = tuple(st.session_state.get("offline_drop_notes") or ())
+    st.session_state.offline_drop_notes = list(notes or previous)
+    # An intentional empty multiselect must stay empty; only fill AAPL when
+    # something was requested and nothing offline-available remained.
+    widget_empty = not [str(s).strip() for s in symbols if str(s).strip()]
+    if widget_empty and not (
+        st.session_state.get("offline_intent_symbols") or _symbols_named_in_query()
+    ):
+        kept = []
+    if list(st.session_state.get("symbols") or []) != kept:
+        st.session_state.symbols = kept
+    if kept and st.session_state.get("benchmark") != bench:
+        st.session_state.benchmark = bench
+    return kept, (bench if kept else benchmark), tuple(st.session_state.offline_drop_notes)
+
+
+def _tidy_symbols() -> None:
+    """Typed tickers become upper case, and a repeat is dropped."""
+    typed = st.session_state.get("symbols") or []
+    cleaned = [str(entry).strip().upper() for entry in typed if str(entry).strip()]
+    st.session_state.symbols = list(dict.fromkeys(cleaned))
+
+
+def _tidy_benchmark() -> None:
+    typed = st.session_state.get("benchmark")
+    if typed:
+        st.session_state.benchmark = str(typed).strip().upper()
+
+
+def _add_search_hit() -> None:
+    label = st.session_state.get("search_choice") or ""
+    symbol = label.split("—")[0].strip().upper()
+    current = list(st.session_state.get("symbols") or [])
+    if not symbol or symbol in current:
+        return
+    if len(current) >= MAX_SYMBOLS:
+        st.session_state.search_error = (
+            f"The comparison already has {MAX_SYMBOLS} symbols. Remove one, then add {symbol}."
+        )
+        return
+    st.session_state.symbols = [*current, symbol]
+
+
+def _mode() -> bool:
+    mode = st.sidebar.radio(
+        "Data",
+        (LIVE, OFFLINE),
+        captions=MODE_CAPTIONS,
+        key="data",
+        bind=BOUND,
+        on_change=_on_data_mode_change,
+        help="Live data is Yahoo Finance. The offline demo reads only the files shipped with this app.",
+    )
+    offline = mode == OFFLINE
+    if offline:
+        first, last = _offline_span()
+        st.sidebar.info(
+            f"Bundled files for {', '.join(offline_symbols())}, "
+            f"{first:%d %b %Y} – {last:%d %b %Y}. This mode does not call Yahoo Finance."
+        )
+    return offline
+
+
+def _symbol_picker(offline: bool) -> list[str]:
+    if offline:
+        options = list(offline_symbols())
+        guidance = "The offline demo ships these four files."
+        # Bound widgets drop values that are not in options. Align session
+        # state first so the multiselect opens on what offline can show.
+        current = [str(s).strip().upper() for s in (st.session_state.get("symbols") or []) if str(s).strip()]
+        intent = list(st.session_state.get("offline_intent_symbols") or [])
+        kept, _, _ = filter_offline_selection(
+            current or intent or _symbols_named_in_query(),
+            st.session_state.get("benchmark") or st.session_state.get("offline_intent_benchmark"),
+        )
+        if current or intent or _symbols_named_in_query():
+            st.session_state.symbols = kept
+    else:
+        chosen = st.session_state.get("symbols") or []
+        options = list(dict.fromkeys([*POPULAR, *chosen]))
+        guidance = "Pick from the list, or type any Yahoo Finance ticker and press Enter."
+    return st.sidebar.multiselect(
+        "Symbols",
+        options,
+        default=[DEFAULT_TICKER],
+        key="symbols",
+        max_selections=MAX_SYMBOLS,
+        accept_new_options=not offline,
+        bind=BOUND,
+        on_change=_tidy_symbols,
+        placeholder="Add a ticker",
+        help=f"Up to {MAX_SYMBOLS} symbols. {guidance}",
+    )
+
+
+def _benchmark_picker(offline: bool) -> str:
+    if offline:
+        options = list(OFFLINE_BENCHMARKS)
+        current = (
+            st.session_state.get("benchmark")
+            or st.session_state.get("offline_intent_benchmark")
+            or _benchmark_named_in_query()
+            or DEFAULT_BENCHMARK
+        )
+        _, bench, _ = filter_offline_selection(st.session_state.get("symbols") or [], current)
+        st.session_state.benchmark = bench
+    else:
+        chosen = st.session_state.get("benchmark")
+        options = list(dict.fromkeys([*BENCHMARK_CHOICES, *([chosen] if chosen else [])]))
+    picked = st.sidebar.selectbox(
+        "Benchmark",
+        options,
+        index=options.index(DEFAULT_BENCHMARK) if DEFAULT_BENCHMARK in options else 0,
+        key="benchmark",
+        accept_new_options=not offline,
+        bind=BOUND,
+        on_change=_tidy_benchmark,
+        help="The yardstick for the gap, beta, correlation and capture. In live mode you can type another ticker.",
+    )
+    benchmark = picked or DEFAULT_BENCHMARK
+    st.sidebar.caption(BENCHMARK_CHOICES.get(benchmark, "Custom benchmark"))
+    return benchmark
+
+
+def _symbol_search() -> None:
+    with st.sidebar.form("finder"):
+        query = st.text_input("Find a company or fund", placeholder="Apple, Microsoft, S&P 500")
+        search = st.form_submit_button("Search")
+    if search:
+        try:
+            st.session_state.search_hits = search_symbols(query)
+            st.session_state.search_error = ""
+        except MarketDataError as exc:
+            st.session_state.search_hits = []
+            st.session_state.search_error = str(exc)
+    error = st.session_state.get("search_error") or ""
+    hits = st.session_state.get("search_hits") or []
+    if hits:
+        labels = [f"{hit.symbol} — {hit.name}" for hit in hits]
+        st.sidebar.selectbox("Matches", labels, key="search_choice")
+        st.sidebar.button("Add to comparison", on_click=_add_search_hit)
+    if error:
+        st.sidebar.warning(error)
+
+
+def _settings() -> dict:
+    with st.sidebar.expander("Chart and risk settings"):
+        short = st.number_input(
+            "Short moving average (days)",
+            min_value=MIN_MA_WINDOW,
+            max_value=MAX_MA_WINDOW - 1,
+            value=MA_SHORT,
+            step=1,
+            key="ma_short",
+            bind=BOUND,
+        )
+        long = st.number_input(
+            "Long moving average (days)",
+            min_value=MIN_MA_WINDOW + 1,
+            max_value=MAX_MA_WINDOW,
+            value=MA_LONG,
+            step=1,
+            key="ma_long",
+            bind=BOUND,
+        )
+        rate = st.number_input(
+            "Risk-free rate (% a year)",
+            min_value=RISK_FREE_MIN * PERCENT,
+            max_value=RISK_FREE_MAX * PERCENT,
+            value=DEFAULT_RISK_FREE * PERCENT,
+            step=RISK_FREE_STEP,
+            format="%.2f",
+            key="rf",
+            bind=BOUND,
+            help="Used by the Sharpe and Sortino ratios. Zero is the default so the assumption is visible, not guessed.",
+        )
+    return {"ma_short": int(short), "ma_long": int(long), "risk_free": float(rate) / PERCENT}
+
+
+def _sidebar() -> dict:
+    st.sidebar.header("Briefing")
+    _capture_offline_intent()
+    offline = _mode()
+    symbols = _symbol_picker(offline)
+    benchmark = _benchmark_picker(offline)
+    notes: tuple[str, ...] = ()
+    if offline:
+        symbols, benchmark, notes = _apply_offline_filter(symbols, benchmark)
+    else:
+        st.session_state.pop("offline_drop_notes", None)
+        st.session_state.pop("offline_intent_symbols", None)
+        st.session_state.pop("offline_intent_benchmark", None)
+        st.session_state.pop("offline_intent_captured", None)
+    if not offline:
+        _symbol_search()
+    settings = _settings()
+    refresh = False
+    if not offline:
+        refresh = st.sidebar.button("Refresh prices")
+        st.sidebar.caption(
+            f"A download is reused for {CACHE_TTL_HOURS} hours. "
+            "Refresh fetches Yahoo Finance again."
+        )
+    st.sidebar.caption(
+        "Zooming a chart, or pressing a chart's range buttons, changes the view only. "
+        "The metrics use the range selected above the briefing."
+    )
+    return {
+        "offline": offline,
+        "symbols": symbols,
+        "benchmark": benchmark,
+        "refresh": refresh,
+        "offline_notes": notes,
+        **settings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Page: range and focus
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(show_spinner=False)
+def _offline_span() -> tuple[date, date]:
+    first, last = offline_span()
+    return first.date(), last.date()
+
+
+def _range_picker(offline: bool) -> dict:
+    preset = st.segmented_control(
+        "Date range",
+        RANGE_OPTIONS,
+        default=DEFAULT_PRESET,
+        required=True,
+        key="range",
+        bind=BOUND,
+        help="Presets count back from the latest bar. Custom takes any two dates.",
+    )
+    if preset != CUSTOM:
+        return {"preset": preset, "start": None, "end": None}
+    if offline:
+        earliest, latest = _offline_span()
+        default_start = earliest
+    else:
+        earliest, latest = EARLIEST_PICKABLE, date.today()
+        default_start = latest - timedelta(days=DEFAULT_CUSTOM_DAYS)
+    left, right, _ = st.columns((1, 1, 2))
+    start = left.date_input(
+        "Start", value=default_start, min_value=earliest, max_value=latest, key="start", bind=BOUND
+    )
+    end = right.date_input(
+        "End", value=latest, min_value=earliest, max_value=latest, key="end", bind=BOUND
+    )
+    return {"preset": None, "start": start, "end": end}
+
+
+def _focus_picker(symbols: list[str], benchmark: str) -> str | None:
+    """Which symbol the cards, sentences and single-symbol charts describe."""
+    candidates = [symbol for symbol in symbols if symbol != benchmark]
+    if st.session_state.get("focus") not in candidates:
+        st.session_state.pop("focus", None)
+    if len(candidates) < 2:
+        return candidates[0] if candidates else None
+    return st.segmented_control(
+        "In focus",
+        candidates,
+        default=candidates[0],
+        required=True,
+        key="focus",
+        bind=BOUND,
+        help="The cards, the sentences and the single-symbol charts describe this symbol. "
+        "The table and the Compare chart cover all of them.",
+    )
+
+
+def _title(symbols: list[str], benchmark: str) -> str:
+    names = [symbol for symbol in symbols if symbol != benchmark] or [DEFAULT_TICKER]
+    return f"{', '.join(names)} vs {benchmark}"
+
+
+# ---------------------------------------------------------------------------
+# Page: results
+# ---------------------------------------------------------------------------
+
+
+def _warnings(briefing, offline_notes: tuple[str, ...] = ()) -> None:
+    for note in offline_notes:
+        st.info(note)
+    for note in briefing.notes:
+        st.info(note)
+    for symbol, reason in briefing.failed.items():
+        st.warning(f"{symbol} was left out. {reason}")
+    if briefing.benchmark_error:
+        st.warning(f"Benchmark unavailable. {briefing.benchmark_error}")
+    if briefing.stale:
+        st.warning(
+            f"Yahoo Finance did not answer for {', '.join(briefing.stale)}. "
+            f"The page is showing the previous download, which is older than {CACHE_TTL_HOURS} hours. "
+            "The fetch time below is when that download was made."
+        )
+
+
+def _fetched_text(history) -> str:
+    if history.fetched_at is None:
+        return "bundled file, no live refresh"
+    stamp = history.fetched_at
+    stamp = stamp.tz_convert("UTC") if stamp.tzinfo else stamp.tz_localize("UTC")
+    if history.stale:
+        freshness = "older download, Yahoo did not answer"
+    elif history.from_cache:
+        freshness = "cached download"
+    else:
+        freshness = "just downloaded"
+    return f"fetched {stamp:%Y-%m-%d %H:%M} UTC · {freshness}"
+
+
+def _status(briefing) -> None:
+    loaded = list(briefing.histories.values())
+    if briefing.benchmark is not None:
+        loaded.append(briefing.benchmark)
+    rows = "".join(
+        f"<strong>{html.escape(history.ticker)}.</strong> {html.escape(history.source)} "
+        f"· latest bar {history.latest_bar.date().isoformat()} "
+        f'· <span class="muted">{_fetched_text(history)}</span><br>'
+        for history in loaded
+    )
+    window = briefing.report.stats
+    bench = briefing.benchmark.ticker if briefing.benchmark is not None else "unavailable"
+    st.markdown(
+        f"""
+        <div class="status-card">
+        {rows}
+        <strong>This briefing.</strong> {html.escape(briefing.focus)} from
+        {window.window_start.date().isoformat()} to {window.window_end.date().isoformat()}
+        · {window.n_days} trading days · benchmark {html.escape(bench)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _number(value: float | None, pattern: str) -> str:
+    return MISSING if value is None else pattern.format(value)
+
+
+def _metrics(stats) -> None:
+    help_text = metric_help()
+    bench = stats.benchmark or "benchmark"
+    gap = MISSING if stats.excess_return is None else f"{stats.excess_return * PERCENT:+.1f} pp"
+    label = (stats.vol_label or "not ranked").capitalize()
+    top = st.columns(5)
+    top[0].metric("Cumulative return", f"{stats.cumulative_return:+.1%}", help=help_text["cumulative_return"])
+    top[1].metric("Annualized return", _number(stats.annualized_return, "{:+.1%}"), help=help_text["annualized_return"])
+    top[2].metric("Annualized volatility", _number(stats.annualized_volatility, "{:.1%}"), help=help_text["annualized_volatility"])
+    top[3].metric("Maximum drawdown", _number(stats.max_drawdown, "{:.1%}"), help=help_text["max_drawdown"])
+    top[4].metric(f"Vs {bench}", gap, help=help_text["excess_return"])
+    bottom = st.columns(5)
+    bottom[0].metric("Sharpe ratio", _number(stats.sharpe, "{:.2f}"), help=help_text["sharpe"])
+    bottom[1].metric("Sortino ratio", _number(stats.sortino, "{:.2f}"), help=help_text["sortino"])
+    bottom[2].metric(f"Beta vs {bench}", _number(stats.beta, "{:.2f}"), help=help_text["beta"])
+    bottom[3].metric(f"Correlation vs {bench}", _number(stats.correlation, "{:.2f}"), help=help_text["correlation"])
+    bottom[4].metric("Volatility label", label, help=volatility_rule_text())
+
+
+def _card(sentences) -> None:
+    blocks = "".join(f"<p>{html.escape(sentence)}</p>" for sentence in sentences)
+    st.markdown(f'<div class="summary-card">{blocks}</div>', unsafe_allow_html=True)
+
+
+def _summary(briefing) -> None:
+    stats = briefing.report.stats
+    st.subheader(f"What the numbers say about {briefing.focus}")
+    _card(briefing.report.sentences)
+    if briefing.comparison.sentences:
+        st.subheader("Across the symbols")
+        _card(briefing.comparison.sentences)
+    with st.expander("How every figure and label is defined"):
+        for note in methodology_notes(stats.ma_short_window, stats.ma_long_window):
+            st.markdown(f"- {note}")
+
+
+def _table(briefing) -> None:
+    st.subheader("Side by side")
+    table = comparison_table(briefing.comparison)
+    st.markdown(_table_html(table, focus=briefing.focus), unsafe_allow_html=True)
+    st.caption(
+        "Each row uses that symbol's own sessions inside the selected range. Beta, correlation, capture "
+        "and the gap are measured against the benchmark on shared sessions. The shaded row is the symbol in focus."
+    )
+
+
+def _table_html(table, *, focus: str) -> str:
+    """
+    The comparison as a plain HTML table. Every cell goes through the
+    same formats the downloaded summary uses, so the two always agree.
+    """
+    columns = [column for column in TABLE_FORMATS if column in table.columns]
+    head = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
+    body = []
+    for symbol, row in table.iterrows():
+        css = "focus" if symbol == focus else ""
+        cells = "".join(f"<td>{html.escape(format_cell(column, row[column]))}</td>" for column in columns)
+        body.append(f'<tr class="{css}"><th scope="row">{html.escape(str(symbol))}</th>{cells}</tr>')
+    return (
+        '<div class="compare-wrap"><table class="compare">'
+        f"<thead><tr><th>Symbol</th>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+    )
+
+
+def _share_query(request: dict) -> str:
+    """The query string for this view. A setting left at its default is omitted, as the address bar does."""
+    pairs: list[tuple[str, str]] = []
+    if request["offline"]:
+        pairs.append(("data", OFFLINE))
+    if list(request["symbols"]) != [DEFAULT_TICKER]:
+        pairs.extend(("symbols", symbol) for symbol in request["symbols"])
+    if request["benchmark"] != DEFAULT_BENCHMARK:
+        pairs.append(("benchmark", request["benchmark"]))
+    if request["preset"] is None:
+        pairs.extend([("range", CUSTOM), ("start", request["start"].isoformat()), ("end", request["end"].isoformat())])
+    elif request["preset"] != DEFAULT_PRESET:
+        pairs.append(("range", request["preset"]))
+    compared = [symbol for symbol in request["symbols"] if symbol != request["benchmark"]]
+    if request["focus"] and compared and request["focus"] != compared[0]:
+        pairs.append(("focus", request["focus"]))
+    if request["ma_short"] != MA_SHORT:
+        pairs.append(("ma_short", str(request["ma_short"])))
+    if request["ma_long"] != MA_LONG:
+        pairs.append(("ma_long", str(request["ma_long"])))
+    if request["risk_free"] != DEFAULT_RISK_FREE:
+        pairs.append(("rf", f"{request['risk_free'] * PERCENT:g}"))
+    if request.get("tab", TABS[0]) != TABS[0]:
+        pairs.append(("tab", request["tab"]))
+    if request.get("chart", LINE) != LINE:
+        pairs.append(("chart", request["chart"]))
+    return urlencode(pairs)
+
+
+def _share_link(request: dict) -> str:
+    query = _share_query(request)
+    address = st.context.url
+    if not address:
+        return f"?{query}" if query else "(default view)"
+    parts = urlsplit(address)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query, ""))
+
+
+def _take_away(briefing, request: dict) -> None:
+    left, right = st.columns((1, 3))
+    with left:
+        st.download_button(
+            "Download analysis summary",
+            data=briefing.markdown,
+            file_name=f"{'_'.join(briefing.reports).lower()}_briefing.md",
+            mime="text/markdown",
+        )
+    with right:
+        with st.expander("Link to this view"):
+            st.code(_share_link(request), language=None)
+            st.caption(
+                "The address bar updates the same way as you change symbols, benchmark, range, focus, "
+                "settings and the open chart tab. Opening the link loads the same view with the prices "
+                "available at that time."
+            )
+
+
+def _show(figure, missing: str) -> None:
+    if figure is None:
+        st.info(missing)
+    else:
+        st.plotly_chart(figure, width="stretch", theme=None, config=PLOTLY_CONFIG)
+
+
+def _charts(briefing) -> None:
+    figures = briefing.figures
+    stats = briefing.report.stats
+    compare_tab, price_tab, drawdown_tab, risk_tab, returns_tab = st.tabs(TABS, key="tab", bind=BOUND)
+    with compare_tab:
+        _show(figures["comparison"], "The comparison chart needs two sessions that every symbol shares.")
+        st.caption(
+            "Every line starts at 100 on the first session all of them share, so the height of a line is "
+            "its growth since that day. The benchmark is dashed. The symbol in focus is the thicker line."
+        )
+    with price_tab:
+        style = st.segmented_control(
+            "Chart type", (LINE, CANDLES), default=LINE, required=True, key="chart", bind=BOUND
+        )
+        if style == CANDLES:
+            _show(figures["candles"], "No bars to draw.")
+            st.caption(
+                "Open, high, low and close are on the adjusted-close scale, so the candles and the "
+                f"{stats.ma_short_window}- and {stats.ma_long_window}-day averages line up. Volume is underneath."
+            )
+        else:
+            _show(figures["price"], "No prices to draw.")
+            st.caption(
+                "Hover a date for the adjusted close and both averages. The slider under the chart and the "
+                "buttons above it zoom the view. Change the average windows under Chart and risk settings."
+            )
+    with drawdown_tab:
+        _show(figures["drawdown"], "No drawdown to draw.")
+        st.caption(
+            "Each point is that day's adjusted close divided by the highest close so far in the window, "
+            "minus one. The dashed line is the benchmark's own drawdown over the same range."
+        )
+    with risk_tab:
+        _show(figures["volatility"], "No volatility to draw.")
+        st.caption(
+            f"The line is the trailing {ROLLING_VOL_WINDOW}-day annualized volatility. "
+            "The dashed line is the volatility of the whole selected window."
+        )
+        _show(
+            figures["relationship"],
+            f"Rolling beta and correlation need a benchmark and at least {ROLLING_BETA_WINDOW} shared daily returns.",
+        )
+        st.caption(
+            f"Beta and correlation over the trailing {ROLLING_BETA_WINDOW} shared daily returns. "
+            "A beta near 1 moves like the benchmark. A correlation near 0 moves independently of it."
+        )
+    with returns_tab:
+        _show(figures["histogram"], "No daily returns to draw.")
+        st.caption(
+            "How often each size of daily move happened. The benchmark is the grey shape behind, "
+            "in the same bins. The dashed line is the mean daily return."
+        )
+        _show(figures["heatmap"], "No monthly returns to draw.")
+        st.caption(
+            "Monthly returns inside the selected range. The first and last months can be partial. "
+            "Compounding every cell gives the cumulative return at the top of the page."
+        )
+
+
+def _brief(request: dict):
+    names = ", ".join([*request["symbols"], request["benchmark"]])
+    spinner = (
+        f"Reading the bundled files for {names}…"
+        if request["offline"]
+        else f"Loading {names} from Yahoo Finance…"
+    )
+    with st.spinner(spinner):
+        return run_briefing(
+            tickers=request["symbols"],
+            benchmark=request["benchmark"],
+            focus=request["focus"],
+            start=request["start"],
+            end=request["end"],
+            preset=request["preset"],
+            offline=request["offline"],
+            refresh=request["refresh"],
+            ma_short=request["ma_short"],
+            ma_long=request["ma_long"],
+            risk_free=request["risk_free"],
+        )
+
+
+def main() -> None:
+    st.set_page_config(page_title="Market briefing", layout="wide", initial_sidebar_state="expanded")
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
+    request = _sidebar()
+    kicker = "Market briefing · offline demo" if request["offline"] else "Market briefing"
+    st.markdown(f'<div class="kicker">{kicker}</div>', unsafe_allow_html=True)
+    # The headline is filled in again after loading, so it names what was briefed.
+    headline = st.empty()
+    headline.title(_title(request["symbols"], request["benchmark"]))
+    st.write(
+        f"Pick up to {MAX_SYMBOLS} symbols and a benchmark. Read each one's return, risk and drawdown over "
+        "a window you choose, and see how closely it moved with the benchmark on the dates both traded."
+    )
+    request.update(_range_picker(request["offline"]))
+    offline_notes = tuple(request.get("offline_notes") or ())
+    if not request["symbols"]:
+        for note in offline_notes:
+            st.info(note)
+        st.info("Add at least one symbol in the sidebar to build a briefing.")
+        return
+    # Prefer a focus the user already chose; the dashboard falls back if
+    # that symbol failed to load. The picker below only offers loaded ones.
+    request["focus"] = st.session_state.get("focus")
+
+    try:
+        briefing = _brief(request)
+    except MarketDataError as exc:
+        for note in offline_notes:
+            st.info(note)
+        st.error(str(exc))
+        if not request["offline"]:
+            st.info("The offline demo is available under Data in the sidebar. It does not use the network.")
+        return
+    except AnalysisError as exc:
+        for note in offline_notes:
+            st.info(note)
+        st.error(str(exc))
+        return
+
+    loaded = list(briefing.reports)
+    chosen = _focus_picker(loaded, request["benchmark"])
+    if chosen and chosen != briefing.focus:
+        # The picker only lists symbols that loaded; rebuild so the cards,
+        # sentences and single-symbol charts match the new focus.
+        briefing = _brief({**request, "symbols": loaded, "focus": chosen})
+        loaded = list(briefing.reports)
+    request["focus"] = chosen or briefing.focus
+    request["symbols"] = loaded
+
+    headline.title(_title(loaded, request["benchmark"]))
+    _warnings(briefing, offline_notes=offline_notes)
+    _status(briefing)
+    _metrics(briefing.report.stats)
+    _table(briefing)
+    _charts(briefing)
+    _summary(briefing)
+    request["tab"] = st.session_state.get("tab") or TABS[0]
+    request["chart"] = st.session_state.get("chart") or LINE
+    _take_away(briefing, request)
+
+
+main()

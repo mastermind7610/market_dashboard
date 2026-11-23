@@ -13,3 +13,12 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# Streamlit local secrets. The demo uses none.
+.streamlit/secrets.toml
+
+# Yahoo Finance downloads. The bundled sample files stay in git.
+.cache/
+
+# Generated briefing. The app can write a new one.
+analysis.md
