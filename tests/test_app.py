@@ -283,11 +283,14 @@ class OfflinePageTests(unittest.TestCase):
         self.assertTrue(any('"hovermode":"closest"' in spec for spec in specs))
         # Help tooltips on the Phase 2 metric tiles must be non-empty strings.
         cards = {card.label: card for card in page.metric}
-        for label in ("95% param. VaR", "95% CVaR / ES", "Alpha vs SPY"):
+        for label in ("Parametric VaR", "CVaR / ES", "Alpha vs SPY"):
             self.assertIn(label, cards)
             self.assertTrue(cards[label].help, f"{label} is missing help text")
             self.assertNotIn("μ", cards[label].help)
             self.assertNotIn("×", cards[label].help)
+        # Do not style every stButtonGroup — that drew a grey strip under the
+        # date-range control. Section nav needs no empty markdown wrapper either.
+        self.assertNotIn("stButtonGroup", css)
 
     def test_portfolio_mode_with_one_symbol_shows_a_clear_callout(self) -> None:
         page = _page(data="Offline", symbols=["AAPL"], portfolio="True")

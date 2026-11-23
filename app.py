@@ -205,15 +205,6 @@ PAGE_CSS = """
     .year-table th, .year-table td {padding: 0.35rem 0.55rem; border-bottom: 1px solid #eef1f5; text-align: right;}
     .year-table th:first-child, .year-table td:first-child {text-align: left;}
     div[data-testid="stTabs"] {margin-top: 0.4rem;}
-    /* Section nav is a Streamlit segmented control; do not wrap it in a
-       separate markdown <div> (that left an empty bar under the date range). */
-    div[data-testid="stButtonGroup"] {
-        background: #f8fafc;
-        border: 1px solid #e4e8ee;
-        border-radius: 12px;
-        padding: 0.35rem 0.45rem;
-        margin: 0.15rem 0 0.65rem 0;
-    }
     .callout {
         background: #fff8eb;
         border: 1px solid #f0d9a8;
@@ -831,13 +822,15 @@ def _metrics(stats) -> None:
     extra = st.columns(5)
     # Required keys (not .get(..., "")) so Streamlit always gets a real help
     # string and draws the tooltip icon — empty help hides the icon.
+    # Keep labels short: long "95% param. VaR" labels were clipping the
+    # help icon on Streamlit Cloud's metric chrome.
     extra[0].metric(
-        "95% param. VaR",
+        "Parametric VaR",
         _number(stats.parametric_var_95, "{:.1%}"),
         help=help_text["parametric_var_95"],
     )
     extra[1].metric(
-        "95% CVaR / ES",
+        "CVaR / ES",
         _number(stats.cvar_95, "{:.1%}"),
         help=help_text["cvar_95"],
     )
@@ -847,12 +840,12 @@ def _metrics(stats) -> None:
         help=help_text["alpha"],
     )
     extra[3].metric(
-        "Peak→trough (days)",
+        "Peak to trough",
         "—" if stats.drawdown_days_to_trough is None else str(stats.drawdown_days_to_trough),
         help=help_text["drawdown_days_to_trough"],
     )
     extra[4].metric(
-        "Trough→recovery",
+        "Trough to recovery",
         "—" if stats.drawdown_days_to_recovery is None else str(stats.drawdown_days_to_recovery),
         help=help_text["drawdown_days_to_recovery"],
     )
