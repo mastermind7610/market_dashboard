@@ -259,8 +259,11 @@ class OfflinePageTests(unittest.TestCase):
         css = _html(page, "<style>")
         self.assertIn("@media (max-width: 900px)", css)
         self.assertIn("@media (max-width: 640px)", css)
-        self.assertIn(".section-nav", css)
         self.assertIn(".callout", css)
+        self.assertNotIn('<div class="section-nav">', css)
+        # Empty markdown wrappers under the date range used to leave a stray bar.
+        orphan_nav = [block.value for block in page.markdown if block.value.strip() == '<div class="section-nav">']
+        self.assertEqual(orphan_nav, [])
         link = page.code[0].value
         self.assertIn("portfolio=True", link)
         self.assertIn("rebalance=monthly", link)
@@ -273,6 +276,18 @@ class OfflinePageTests(unittest.TestCase):
         )
         self.assertIsNotNone(briefing.figures.get("allocation"))
         self.assertIsNotNone(briefing.figures.get("risk_contribution"))
+        # Charts must actually be mounted on the page (not only computed).
+        specs = [chart.proto.spec for chart in page.get("plotly_chart")]
+        self.assertTrue(any("Portfolio allocation" in spec for spec in specs))
+        self.assertTrue(any("Risk contribution" in spec for spec in specs))
+        self.assertTrue(any('"hovermode":"closest"' in spec for spec in specs))
+        # Help tooltips on the Phase 2 metric tiles must be non-empty strings.
+        cards = {card.label: card for card in page.metric}
+        for label in ("95% param. VaR", "95% CVaR / ES", "Alpha vs SPY"):
+            self.assertIn(label, cards)
+            self.assertTrue(cards[label].help, f"{label} is missing help text")
+            self.assertNotIn("μ", cards[label].help)
+            self.assertNotIn("×", cards[label].help)
 
     def test_portfolio_mode_with_one_symbol_shows_a_clear_callout(self) -> None:
         page = _page(data="Offline", symbols=["AAPL"], portfolio="True")
