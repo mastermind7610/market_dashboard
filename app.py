@@ -819,7 +819,8 @@ def _table(briefing) -> None:
     st.markdown(_table_html(table, focus=briefing.focus), unsafe_allow_html=True)
     st.caption(
         "Each row uses that symbol's own sessions inside the selected range. Beta, correlation, capture "
-        "and the gap are measured against the benchmark on shared sessions. The shaded row is the symbol in focus."
+        "and the gap are measured against the benchmark on shared sessions. The blue shaded row is the "
+        "symbol in focus; the green shaded row is the portfolio when Portfolio mode is on."
     )
 
 
@@ -933,7 +934,8 @@ def _charts(briefing) -> None:
         _show(figures["comparison"], "The comparison chart needs two sessions that every symbol shares.")
         st.caption(
             "Every line starts at 100 on the first session all of them share, so the height of a line is "
-            "its growth since that day. The benchmark is dashed. The symbol in focus is the thicker line."
+            "its growth since that day. The benchmark is dashed. The portfolio, when on, is the solid green "
+            "line. The symbol in focus is the thicker line among the individual symbols."
         )
     with price_tab:
         style = st.segmented_control(
