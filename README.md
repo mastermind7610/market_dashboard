@@ -64,19 +64,21 @@ On 22 Nov 2026, a live equal-weight AAPL+MSFT portfolio against SPY for the last
 The page is laid out top to bottom:
 
 1. **Date range**: 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y, Max, or **Custom** with a start and an end date.
-2. **Status**: the source, the latest bar and the fetch time for every symbol.
-3. **Company snapshot**: name, sector, market cap, P/E, dividend yield and 52-week range for the focused symbol. Missing fields are named; offline placeholders say so.
-4. **Cards**: cumulative return, annualized return, volatility, maximum drawdown, gap to the benchmark, Sharpe, Sortino, beta, correlation, 95% historical VaR. The volatility label sits under the cards.
-5. **Side by side**: the table above. The portfolio row is green when Portfolio mode is on.
-6. **Charts**, in five tabs:
+2. **On this page**: jump to Overview, Comparison, Portfolio, Charts, or Narrative (or keep **All sections**).
+3. **Status**: the source, the latest bar and the fetch time for every symbol.
+4. **Company snapshot**: name, sector, market cap, P/E, dividend yield and 52-week range for the focused symbol. Missing fields are named; offline placeholders say so.
+5. **Cards**: return, risk, VaR family, alpha, and drawdown recovery timing. Question-mark help text matches `docs/METHODOLOGY.md`.
+6. **Side by side**: the table above. The portfolio row is green when Portfolio mode is on.
+7. **Portfolio construction**: turnover/cost metrics, diversification ratio, allocation and risk-contribution charts when a mix is active. Portfolio mode with only one symbol shows a clear callout instead of a silent skip.
+8. **Charts**, in five tabs:
    - **Compare**: every symbol rebased to 100 on the first session they all share. The benchmark is dashed; the portfolio is solid green.
    - **Price**: adjusted close with two moving averages, as a line or as candles with volume.
    - **Drawdown**: the stock's and the benchmark's decline from their running peaks.
-   - **Risk**: rolling 21-day volatility, and rolling 63-day beta and correlation.
+   - **Risk**: rolling volatility, beta/correlation, rolling Sharpe/Sortino, and the correlation heatmap.
    - **Returns**: the daily return histogram over the benchmark's, and the monthly returns heatmap.
-7. **Calendar-year returns** for the focused symbol, with a short sentence naming the best and worst years in the window.
-8. **What the numbers say**: the sentences for the focus, the portfolio when present, and the comparison, plus the definition of every figure and label.
-9. **Download analysis summary** (Markdown), **Download price/return CSV**, and **Link to this view**.
+9. **Calendar-year returns** for the focused symbol, with a short sentence naming the best and worst years in the window.
+10. **What the numbers say**: the sentences for the focus, the portfolio when present, and the comparison, plus the definition of every figure and label.
+11. **Download analysis summary** (Markdown), **Download price/return CSV**, and **Link to this view**.
 
 ![Candles, volume and resized averages](docs/screenshots/candlestick.png)
 

@@ -351,7 +351,10 @@ class ExportAndBriefingTests(unittest.TestCase):
             portfolio=True,
         )
         self.assertIsNone(briefing.portfolio_report)
-        self.assertTrue(any("at least two" in note.lower() for note in briefing.notes))
+        joined = " ".join(briefing.notes)
+        self.assertIn("at least two loaded symbols", joined)
+        self.assertIn("AAPL", joined)
+        self.assertIn("green portfolio line", joined)
 
 
 class CompanySearchTests(unittest.TestCase):

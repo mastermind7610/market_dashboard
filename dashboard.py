@@ -69,16 +69,18 @@ from features import (
     window_for_preset,
 )
 from plots import (
+    allocation_chart,
     candlestick_chart,
     comparison_chart,
+    correlation_heatmap,
     drawdown_chart,
     monthly_heatmap,
     price_chart,
     return_histogram,
+    risk_contribution_chart,
     rolling_relationship_chart,
-    volatility_chart,
-    correlation_heatmap,
     rolling_risk_adjusted_chart,
+    volatility_chart,
 )
 
 
@@ -221,7 +223,12 @@ def run_briefing(
         )
         notes = notes + portfolio_notes
     elif portfolio and len(reports) < 2:
-        notes = notes + ("Portfolio mode needs at least two loaded symbols.",)
+        loaded = ", ".join(reports) if reports else "none"
+        notes = notes + (
+            f"Portfolio mode is on, but a mix needs at least two loaded symbols "
+            f"(loaded now: {loaded}). Add another ticker to unlock weights, "
+            "the green portfolio line, and construction charts.",
+        )
 
     comparison = build_comparison(reports, benchmark_report, portfolio_report, weights=weight_map)
     figures = _build_figures(reports[chosen], benchmark_report, comparison)
@@ -623,6 +630,14 @@ def _build_figures(
             charts.rolling_sortino,
             ticker=stats.ticker,
             window=ROLLING_BETA_WINDOW,
+        ),
+        "allocation": allocation_chart(
+            None if comparison.diversification is None else comparison.diversification.weights
+        ),
+        "risk_contribution": risk_contribution_chart(
+            None
+            if comparison.diversification is None
+            else comparison.diversification.risk_contribution
         ),
     }
 

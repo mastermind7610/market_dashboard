@@ -433,6 +433,25 @@ def metric_help() -> dict[str, str]:
             f"Loss magnitude of the {VAR_PERCENTILE:.0%} percentile of daily "
             f"simple returns (95% historical VaR)."
         ),
+        "parametric_var_95": (
+            "Gaussian VaR from the sample mean and standard deviation of daily "
+            "simple returns: −(μ + z σ), floored at zero."
+        ),
+        "cvar_95": (
+            "Conditional VaR / expected shortfall: average loss on days at or "
+            "below the historical VaR quantile."
+        ),
+        "alpha": (
+            "Annualised Jensen's alpha versus the benchmark: 252 × "
+            "(average stock excess return − beta × average benchmark excess return)."
+        ),
+        "drawdown_days_to_trough": (
+            "Trading sessions from the peak of the deepest drawdown to its trough."
+        ),
+        "drawdown_days_to_recovery": (
+            "Trading sessions from that trough to the first later close at or "
+            "above the peak price. Blank when the drawdown is unrecovered."
+        ),
     }
 
 

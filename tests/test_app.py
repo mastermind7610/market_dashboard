@@ -51,6 +51,7 @@ class OfflinePageTests(unittest.TestCase):
         self.assertEqual(page.title[0].value, "AAPL vs SPY")
         self.assertIn("Market briefing · offline demo", _html(page, 'class="kicker"'))
         self.assertEqual(len(page.metric), CARD_COUNT)
+        self.assertEqual(page.button_group(key="section").value, "All sections")
         self.assertEqual([tab.label for tab in page.tabs], ["Compare", "Price", "Drawdown", "Risk", "Returns"])
         self.assertIn("Side by side", [heading.value for heading in page.subheader])
         self.assertIn("What the numbers say about AAPL", [heading.value for heading in page.subheader])
@@ -241,6 +242,7 @@ class OfflinePageTests(unittest.TestCase):
         self.assertIn("Company snapshot · AAPL", headings)
         self.assertIn("Calendar-year returns · AAPL", headings)
         self.assertIn("What the numbers say about the portfolio", headings)
+        self.assertIn("Portfolio construction details", headings)
         snap = _html(page, "snapshot-card")
         self.assertIn("Apple Inc.", snap)
         self.assertIn("Offline demo placeholder", snap)
@@ -257,9 +259,44 @@ class OfflinePageTests(unittest.TestCase):
         css = _html(page, "<style>")
         self.assertIn("@media (max-width: 900px)", css)
         self.assertIn("@media (max-width: 640px)", css)
+        self.assertIn(".section-nav", css)
+        self.assertIn(".callout", css)
         link = page.code[0].value
         self.assertIn("portfolio=True", link)
         self.assertIn("rebalance=monthly", link)
+        briefing = run_briefing(
+            tickers=["AAPL", "MSFT"],
+            offline=True,
+            preset="Max",
+            portfolio=True,
+            rebalance="monthly",
+        )
+        self.assertIsNotNone(briefing.figures.get("allocation"))
+        self.assertIsNotNone(briefing.figures.get("risk_contribution"))
+
+    def test_portfolio_mode_with_one_symbol_shows_a_clear_callout(self) -> None:
+        page = _page(data="Offline", symbols=["AAPL"], portfolio="True")
+        self.assertEqual(list(page.exception), [])
+        self.assertTrue(page.sidebar.checkbox(key="portfolio").value)
+        sidebar_warn = " ".join(note.value for note in page.sidebar.warning)
+        self.assertIn("at least two symbols", sidebar_warn)
+        self.assertIn("AAPL", sidebar_warn)
+        callout = _html(page, "callout")
+        self.assertIn("Portfolio mode needs two symbols", callout)
+        self.assertIn("Add another ticker", callout)
+        table = _html(page, "compare-wrap")
+        self.assertNotIn('<tr class="portfolio"', table)
+
+    def test_section_nav_can_focus_on_charts(self) -> None:
+        page = _page(data="Offline", section="Charts")
+        self.assertEqual(list(page.exception), [])
+        self.assertEqual(page.button_group(key="section").value, "Charts")
+        headings = [heading.value for heading in page.subheader]
+        self.assertNotIn("Side by side", headings)
+        self.assertNotIn("What the numbers say about AAPL", headings)
+        self.assertEqual([tab.label for tab in page.tabs], ["Compare", "Price", "Drawdown", "Risk", "Returns"])
+        link = page.code[0].value
+        self.assertIn("section=Charts", link)
 
     def test_company_search_finds_apple_and_the_sidebar_exposes_the_finder(self) -> None:
         from data_loader import MarketDataError, search_symbols
@@ -338,6 +375,8 @@ class LivePageWithStubbedYahooTests(unittest.TestCase):
             self.assertEqual(page.sidebar.multiselect(key="symbols").value, ["AAPL", "NVDA"])
             page.sidebar.radio(key="data").set_value("Offline").run()
         self.assertEqual(list(page.exception), [])
+        # First click must stick; a query-param remount must not snap back to Live.
+        self.assertEqual(page.sidebar.radio(key="data").value, "Offline")
         self.assertEqual(page.sidebar.multiselect(key="symbols").value, ["AAPL"])
         notes = " ".join(note.value for note in page.info)
         self.assertIn("NVDA", notes)
