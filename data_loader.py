@@ -23,7 +23,7 @@ import re
 import time
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -365,7 +365,7 @@ def fetch_history(
         if expired is None:
             raise
         return expired
-    fetched_at = pd.Timestamp(datetime.now(timezone.utc))
+    fetched_at = pd.Timestamp(datetime.now(UTC))
     _write_cache(ticker, frame, fetched_at, directory)
     return _as_history(frame, ticker, YAHOO_SOURCE, fetched_at=fetched_at, from_cache=False)
 
@@ -524,7 +524,8 @@ def _download_yahoo(ticker: str) -> pd.DataFrame:
             last_error = exc
         if attempt < DOWNLOAD_ATTEMPTS - 1:
             time.sleep(DOWNLOAD_RETRY_DELAYS_SECONDS[attempt])
-    assert last_error is not None
+    if last_error is None:
+        raise MarketDataError(f"Yahoo Finance returned no usable bars for {ticker}.")
     raise last_error
 
 
@@ -633,7 +634,7 @@ def _read_cache(
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         fetched_at = pd.Timestamp(meta["fetched_at"])
-        age = pd.Timestamp(datetime.now(timezone.utc)) - fetched_at
+        age = pd.Timestamp(datetime.now(UTC)) - fetched_at
         expired = age > pd.Timedelta(hours=CACHE_TTL_HOURS)
         if expired and not allow_expired:
             return None

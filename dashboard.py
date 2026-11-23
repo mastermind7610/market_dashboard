@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from analyst import AnalystPack, build_analyst_pack
 from data_loader import (
     CompanySnapshot,
     MarketDataError,
@@ -34,11 +35,11 @@ from data_loader import (
     normalize_symbol,
 )
 from features import (
+    DEFAULT_COST_BPS,
     DEFAULT_RISK_FREE,
     MA_LONG,
     MA_SHORT,
     PORTFOLIO_LABEL,
-    PortfolioCostReport,
     PRESETS,
     REBALANCE_NONE,
     REBALANCE_OPTIONS,
@@ -48,9 +49,8 @@ from features import (
     AnalysisError,
     Comparison,
     PeriodReport,
+    PortfolioCostReport,
     aligned_export,
-    portfolio_backtest,
-    DEFAULT_COST_BPS,
     build_comparison,
     build_period,
     comparison_table,
@@ -59,16 +59,16 @@ from features import (
     methodology_notes,
     monthly_table,
     normalize_weights,
+    portfolio_backtest,
     portfolio_frame,
-    portfolio_value,
     shared_sessions,
     validate_average_windows,
+    validate_cost_bps,
     validate_rebalance,
     validate_risk_free,
     volatility_rule_text,
     window_for_preset,
 )
-from analyst import AnalystPack, build_analyst_pack
 from plots import (
     allocation_chart,
     candlestick_chart,
@@ -83,7 +83,6 @@ from plots import (
     rolling_risk_adjusted_chart,
     volatility_chart,
 )
-
 
 DEFAULT_TICKER = "AAPL"
 DEFAULT_BENCHMARK = "SPY"
@@ -176,6 +175,9 @@ def run_briefing(
     # Settings are checked before any download, so a bad window fails fast.
     validate_average_windows(ma_short, ma_long)
     validate_risk_free(risk_free)
+    cost_bps = validate_cost_bps(cost_bps)
+    # Never keep a blank key string; optional LLM stays off without a real secret.
+    llm_api_key = (str(llm_api_key).strip() if llm_api_key else None) or None
     symbols, bench_symbol, rejected, notes = resolve_symbols(ticker, tickers, benchmark)
 
     histories, failed = _load_symbols(symbols, offline=offline, refresh=refresh, cache_dir=cache_dir)
@@ -411,7 +413,7 @@ def _build_portfolio(
     ma_long: int,
     risk_free: float,
     cost_bps: float = DEFAULT_COST_BPS,
-) -> tuple[PeriodReport, dict[str, float], tuple[str, ...], object]:
+) -> tuple[PeriodReport, dict[str, float], tuple[str, ...], PortfolioCostReport]:
     """Build a portfolio report on shared sessions of the loaded symbols."""
     weight_map, notes = normalize_weights(weights, list(reports))
     series = {symbol: reports[symbol].charts.price for symbol in weight_map}

@@ -1071,7 +1071,7 @@ def diversification_stats(
     w = np.array([cleaned[column] for column in cols], dtype=float)
     # Renormalize to the columns present.
     w = w / w.sum()
-    weight_map = {column: float(value) for column, value in zip(cols, w)}
+    weight_map = {column: float(value) for column, value in zip(cols, w, strict=True)}
     cov = frame.cov().to_numpy(dtype=float)
     vols = np.sqrt(np.diag(cov))
     port_var = float(w @ cov @ w)
@@ -1083,7 +1083,7 @@ def diversification_stats(
     effective_n = float(1.0 / float(np.sum(w * w)))
     marginal = cov @ w
     contrib = w * marginal / port_var
-    risk = {column: float(value) for column, value in zip(cols, contrib)}
+    risk = {column: float(value) for column, value in zip(cols, contrib, strict=True)}
     return DiversificationStats(
         weights=weight_map,
         diversification_ratio=ratio,
@@ -1359,10 +1359,10 @@ def portfolio_frame(value: pd.Series) -> pd.DataFrame:
 
 
 def aligned_export(
-    reports: dict[str, "PeriodReport"],
+    reports: dict[str, PeriodReport],
     *,
-    benchmark_report: "PeriodReport | None" = None,
-    portfolio_report: "PeriodReport | None" = None,
+    benchmark_report: PeriodReport | None = None,
+    portfolio_report: PeriodReport | None = None,
 ) -> pd.DataFrame:
     """
     Shared-session prices and daily returns for CSV download.

@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 
 from dashboard import run_briefing
-from data_loader import CompanySnapshot, MarketDataError, fetch_company_snapshot, search_symbols
+from data_loader import (
+    MarketDataError,
+    fetch_company_snapshot,
+    search_symbols,
+)
 from features import (
     MIN_RETURNS_FOR_VAR,
     PORTFOLIO_LABEL,

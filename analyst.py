@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
 
 from features import (
     Comparison,
@@ -28,7 +29,6 @@ from features import (
     PeriodStats,
     PortfolioCostReport,
 )
-
 
 NOT_FINANCIAL_ADVICE = (
     "Not financial advice. This briefing explains historical numbers already "
@@ -347,15 +347,43 @@ def rule_based_brief(facts: AnalystFacts) -> AnalystBrief:
             )
         )
 
-    if have("portfolio.cumulative_return", "focus.benchmark_cumulative_return"):
+    # Portfolio vs benchmark must use the portfolio's own aligned window —
+    # not the focus symbol's. The benchmark's own table row can cover a
+    # longer own-session span (e.g. offline SPY Max +21.4% vs +16.5% on
+    # the shared AAPL+MSFT portfolio sessions).
+    if have("portfolio.cumulative_return", "portfolio.benchmark_cumulative_return"):
+        port_keys = [
+            "portfolio.cumulative_return",
+            "portfolio.benchmark_cumulative_return",
+        ]
+        window_bits = ""
+        if have("portfolio.window_start", "portfolio.window_end"):
+            port_keys.extend(["portfolio.window_start", "portfolio.window_end"])
+            window_bits = (
+                f" from {m['portfolio.window_start'].display} "
+                f"to {m['portfolio.window_end'].display}"
+            )
         claims.append(
             NarrativeClaim(
                 topic="portfolio",
-                fact_keys=("portfolio.cumulative_return", "focus.benchmark_cumulative_return"),
+                fact_keys=tuple(port_keys),
                 text=(
-                    f"The portfolio returned {m['portfolio.cumulative_return'].display} "
-                    f"over the same window; {facts.benchmark or 'the benchmark'} returned "
-                    f"{m['focus.benchmark_cumulative_return'].display}."
+                    f"The portfolio returned {m['portfolio.cumulative_return'].display}"
+                    f"{window_bits} on shared sessions with "
+                    f"{facts.benchmark or 'the benchmark'}; "
+                    f"{facts.benchmark or 'the benchmark'} returned "
+                    f"{m['portfolio.benchmark_cumulative_return'].display} "
+                    f"over those same sessions."
+                ),
+            )
+        )
+    elif have("portfolio.cumulative_return"):
+        claims.append(
+            NarrativeClaim(
+                topic="portfolio",
+                fact_keys=("portfolio.cumulative_return",),
+                text=(
+                    f"The portfolio returned {m['portfolio.cumulative_return'].display}."
                 ),
             )
         )
@@ -570,6 +598,18 @@ def _period_facts(stats: PeriodStats, *, prefix: str) -> list[FactValue]:
     rows: list[FactValue] = [
         _fact(f"{prefix}.ticker", "Ticker", stats.ticker, stats.ticker),
         _fact(
+            f"{prefix}.window_start",
+            "Window start",
+            stats.window_start.date().isoformat(),
+            stats.window_start.date().isoformat(),
+        ),
+        _fact(
+            f"{prefix}.window_end",
+            "Window end",
+            stats.window_end.date().isoformat(),
+            stats.window_end.date().isoformat(),
+        ),
+        _fact(
             f"{prefix}.cumulative_return",
             "Cumulative return",
             stats.cumulative_return,
@@ -731,7 +771,10 @@ def _chat_completion(
     system: str,
     user: str,
 ) -> str:
-    url = f"{base_url}/chat/completions"
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("LLM base URL must be an https:// endpoint")
     body = json.dumps(
         {
             "model": model,
@@ -752,7 +795,8 @@ def _chat_completion(
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
+    # Scheme checked above; stdlib urlopen is the only free transport used here.
+    with urllib.request.urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:  # nosec B310
         payload = json.loads(response.read().decode("utf-8"))
     return payload["choices"][0]["message"]["content"]
 

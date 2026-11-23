@@ -149,7 +149,7 @@ class BenchmarkRelationshipTests(unittest.TestCase):
         stock = [0.02, -0.01, 0.01, 0.01]
         mean_b = sum(benchmark) / 4
         mean_s = sum(stock) / 4
-        covariance = sum((s - mean_s) * (b - mean_b) for s, b in zip(stock, benchmark)) / 3
+        covariance = sum((s - mean_s) * (b - mean_b) for s, b in zip(stock, benchmark, strict=True)) / 3
         variance_b = sum((b - mean_b) ** 2 for b in benchmark) / 3
         variance_s = sum((s - mean_s) ** 2 for s in stock) / 3
         self.assertAlmostEqual(covariance / variance_b, 0.7, places=12)
