@@ -29,6 +29,7 @@ from analyst import (
     untraceable_numbers,
 )
 from dashboard import run_briefing
+from features import PORTFOLIO_LABEL, comparison_table
 
 
 def _offline_pack(**kwargs):
@@ -72,6 +73,62 @@ class AnalystFactsTests(unittest.TestCase):
         self.assertIsNotNone(briefing.analyst)
         self.assertEqual(briefing.analyst.rule_based.mode, RULE_BASED_MODE)
         self.assertIsNone(briefing.analyst.llm)
+
+
+class PortfolioBenchmarkWindowTests(unittest.TestCase):
+    def test_portfolio_narrative_matches_table_not_focus_spy_row(self) -> None:
+        """
+        Offline AAPL+MSFT Max with MSFT in focus: the SPY table row is +21.4%
+        on SPY's own sessions, while the portfolio's aligned SPY print is
+        +16.5%. The analyst must quote the portfolio-window numbers and name
+        that window — never the focus-only or SPY-own-row figure.
+        """
+        briefing = run_briefing(
+            tickers=["AAPL", "MSFT"],
+            focus="MSFT",
+            offline=True,
+            preset="Max",
+            portfolio=True,
+        )
+        pack = briefing.analyst
+        self.assertIsNotNone(pack)
+        self.assertIsNotNone(briefing.portfolio_report)
+        assert_claims_traceable(pack.rule_based, pack.facts)
+
+        port = briefing.portfolio_report.stats
+        focus = briefing.report.stats
+        table = comparison_table(briefing.comparison)
+        port_return = float(table.loc[PORTFOLIO_LABEL, "Return"])
+        spy_own = next(
+            float(table.loc[idx, "Return"])
+            for idx in table.index
+            if str(idx).startswith("SPY")
+        )
+
+        self.assertAlmostEqual(port_return, port.cumulative_return)
+        self.assertAlmostEqual(port.benchmark_cumulative_return, 0.165, places=2)
+        self.assertAlmostEqual(spy_own, 0.214, places=2)
+        # Focus (MSFT) shares SPY's longer own-session print — that is the trap.
+        self.assertAlmostEqual(focus.benchmark_cumulative_return, spy_own, places=3)
+        self.assertNotAlmostEqual(
+            port.benchmark_cumulative_return,
+            focus.benchmark_cumulative_return,
+            places=2,
+        )
+
+        claim = next(c for c in pack.rule_based.claims if c.topic == "portfolio")
+        port_disp = f"{port.cumulative_return:+.1%}"
+        bench_disp = f"{port.benchmark_cumulative_return:+.1%}"
+        start = port.window_start.date().isoformat()
+        end = port.window_end.date().isoformat()
+        self.assertIn(port_disp, claim.text)
+        self.assertIn(bench_disp, claim.text)
+        self.assertIn(start, claim.text)
+        self.assertIn(end, claim.text)
+        self.assertIn("shared sessions", claim.text)
+        self.assertNotIn(f"{spy_own:+.1%}", claim.text)
+        self.assertIn("portfolio.benchmark_cumulative_return", claim.fact_keys)
+        self.assertNotIn("focus.benchmark_cumulative_return", claim.fact_keys)
 
 
 class TraceabilityTests(unittest.TestCase):

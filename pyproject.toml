@@ -1,0 +1,52 @@
+[project]
+name = "market-dashboard"
+version = "0.5.0"
+description = "Streamlit market briefing: returns, risk, portfolio, optional AI analyst"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [".cache", ".venv", "venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+  "E501",  # long quant sentences and HTML blocks are intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+pretty = true
+# Gradual typing: core modules first. features.py is large and still catching
+# up; follow imports silently so dashboard/analyst stay checkable.
+follow_imports = "silent"
+files = ["analyst.py", "data_loader.py", "plots.py", "dashboard.py"]
+exclude = ["(?x)(^tests/)"]
+
+[[tool.mypy.overrides]]
+module = "features"
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = "yfinance.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "plotly.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "streamlit.*"
+ignore_missing_imports = true
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "venv", ".cache"]
+skips = ["B101"]  # asserts are the unittest contract

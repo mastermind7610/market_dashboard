@@ -218,7 +218,7 @@ def comparison_chart(
             colour_index += 1
             width = FOCUS_LINE_WIDTH if symbol == focus else LINE_WIDTH
         _add_line(figure, rebased[symbol], symbol, color, width=width, hover="Index")
-    if benchmark in rebased.columns:
+    if benchmark is not None and benchmark in rebased.columns:
         _add_line(figure, rebased[benchmark], benchmark, COLOR_BENCH, width=LINE_WIDTH, hover="Index", dash="dash")
     figure.add_hline(y=100.0, line_color=COLOR_REFERENCE, line_width=1, line_dash="dot")
     figure.update_layout(yaxis_title="Rebased to 100 on the first shared session")
@@ -457,7 +457,7 @@ def _add_line(
 
 
 
-def correlation_heatmap(matrix) -> go.Figure | None:
+def correlation_heatmap(matrix: pd.DataFrame | None) -> go.Figure | None:
     """Pairwise return correlations for the selected symbols."""
     if matrix is None or getattr(matrix, "empty", True):
         return None

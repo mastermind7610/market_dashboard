@@ -7,7 +7,7 @@ import io
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -329,7 +329,7 @@ class MultiSymbolTests(unittest.TestCase):
             # Age the saved download past the reuse window.
             meta_path = Path(temp_dir) / "AAPL.json"
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            old = datetime.now(timezone.utc) - timedelta(hours=CACHE_TTL_HOURS + 6)
+            old = datetime.now(UTC) - timedelta(hours=CACHE_TTL_HOURS + 6)
             meta["fetched_at"] = pd.Timestamp(old).isoformat()
             meta_path.write_text(json.dumps(meta), encoding="utf-8")
             with patch("data_loader._download_yahoo", down):
@@ -438,7 +438,7 @@ class LiveYahooTests(unittest.TestCase):
         self.assertGreater(len(apple.frame), 2000)
         self.assertEqual(apple.source.startswith("Yahoo Finance"), True)
         self.assertIsNotNone(apple.fetched_at)
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         self.assertLessEqual((today - apple.latest_bar.date()).days, 7)
         self.assertLessEqual((today - spy.latest_bar.date()).days, 7)
         self.assertTrue(any(hit.symbol == "MSFT" for hit in hits))

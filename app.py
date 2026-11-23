@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import streamlit as st
 
+from analyst import LLM_MODE, RULE_BASED_MODE, facts_table_rows
 from dashboard import (
     BENCHMARK_CHOICES,
     DEFAULT_BENCHMARK,
@@ -38,13 +39,14 @@ from data_loader import (
     offline_symbols,
     search_symbols,
 )
+
 # Metric helpers and portfolio constants live in features.py in this repo
 # (not the unrelated PyPI package of the same name).
 from features import (
-    DEFAULT_RISK_FREE,
-    DEFAULT_COST_BPS,
     COST_BPS_MAX,
     COST_BPS_MIN,
+    DEFAULT_COST_BPS,
+    DEFAULT_RISK_FREE,
     MA_LONG,
     MA_SHORT,
     MAX_MA_WINDOW,
@@ -65,11 +67,10 @@ from features import (
     comparison_table,
     describe_calendar_years,
     format_cell,
-    metric_help,
     methodology_notes,
+    metric_help,
     volatility_rule_text,
 )
-from analyst import LLM_MODE, RULE_BASED_MODE, facts_table_rows
 from plots import PLOTLY_CONFIG
 
 # The option text is also the value a shared link carries (?data=Offline),

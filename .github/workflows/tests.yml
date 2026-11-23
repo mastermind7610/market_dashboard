@@ -17,7 +17,41 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install dependencies
+      - name: Install runtime dependencies
         run: pip install -r requirements.txt
       - name: Run unittest suite
         run: python -m unittest discover -s tests -v
+
+  lint-types:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime + quality tools
+        run: pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check .
+      - name: Mypy (core modules)
+        run: mypy
+
+  security:
+    name: pip-audit + bandit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime + quality tools
+        run: pip install -r requirements-dev.txt
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt
+      - name: Bandit (app modules)
+        run: bandit -c pyproject.toml -r analyst.py app.py dashboard.py data_loader.py features.py plots.py

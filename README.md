@@ -28,15 +28,44 @@ Left out on purpose: screeners, news, technical indicators beyond moving average
 
 ## Setup
 
-Python 3.12. From the repository root:
+Python **3.12**. From the repository root (reproducible local install):
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -U pip
 pip install -r requirements.txt
 ```
 
-Pinned packages: `numpy==2.5.5`, `pandas==3.1.1`, `streamlit==1.67.0`, `yfinance==0.2.66`, `plotly==6.3.1`. This round added no packages.
+Runtime pins (also mirrored with transitive pins in `requirements.lock` for audits):
+
+| Package | Pin |
+|---|---|
+| numpy | `2.5.5` |
+| pandas | `3.1.1` |
+| streamlit | `1.67.0` |
+| yfinance | `0.2.66` |
+| plotly | `6.3.1` |
+
+Optional quality tools (free; used by GitHub Actions, not required to run the app):
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+mypy
+bandit -c pyproject.toml -r analyst.py app.py dashboard.py data_loader.py features.py plots.py
+pip-audit -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+No API keys or Streamlit secrets are required. The optional LLM analyst stays off unless you paste a key in the browser session.
+
+### Caching and retries (live Yahoo path)
+
+- Fresh downloads live in `.cache/` for **12 hours** (`CACHE_TTL_HOURS`).
+- Empty or failed Yahoo answers are **never** written to cache.
+- Each download is tried up to **3** times with short backoff (`DOWNLOAD_ATTEMPTS`, `DOWNLOAD_RETRY_DELAYS_SECONDS`).
+- After retries fail, an expired cache entry is served and labelled stale when one exists.
 
 ## Worked example
 
@@ -273,20 +302,21 @@ Zooming a chart, or pressing its range buttons, changes the view only. The figur
 
 Live OHLC from Yahoo is fetched with `auto_adjust=True`, so every symbol is adjusted the same way. The candles are scaled by adjusted close over close so they line up with the averages.
 
-## Tests
+## Tests and CI
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Run `python -m unittest discover -s tests -v` for the current count.
+GitHub Actions (`.github/workflows/tests.yml`) runs three free jobs on every `main` / `cursor/**` push and PR to `main`: **unittest**, **ruff + mypy**, **pip-audit + bandit**. Required checks must pass before merge; do not bypass.
 
 - `tests/test_calculations.py`: hand-computed returns, volatility, drawdown, moving averages, date alignment, volatility labels.
 - `tests/test_metrics.py`: Sharpe, Sortino, beta, correlation, capture, rolling metrics, monthly returns, settings limits, pipeline beta=2 case.
 - `tests/test_pipeline.py`: offline/live briefings, cache, outages, CLI, multi-symbol edges.
 - `tests/test_portfolio_and_risk.py`: weights, buy-and-hold and monthly rebalance hand paths (MTM-then-reset), historical VaR, calendar years, snapshots, CSV, search.
 - `tests/test_advanced_quant.py`: drawdown recovery/underwater, parametric VaR, CVaR, Jensen alpha, diversification, cost-aware backtest, rolling Sharpe, look-ahead guards (rebalance-day prior weights; no forward fill).
-- `tests/test_analyst.py`: typed AnalystFacts, rule-based claim traceability, not-financial-advice, optional LLM off-by-default and drop of untraceable claims.
+- `tests/test_analyst.py`: typed AnalystFacts, rule-based claim traceability (including portfolio-window SPY vs SPY own-row), not-financial-advice, optional LLM off-by-default.
+- `tests/test_architecture.py`: layer import boundaries, cost/LLM input validation, cache/retry constants.
 - `tests/test_app.py`: Streamlit `AppTest` cards (15 metrics including parametric VaR, CVaR, alpha, recovery days), portfolio mode, CSV, search, share links, AI analyst panels.
 
 ## Layout

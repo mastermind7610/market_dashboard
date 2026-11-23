@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 
 from features import (
-    AnalysisError,
+    REBALANCE_MONTHLY,
+    REBALANCE_NONE,
     conditional_var,
     correlation_matrix,
     diversification_stats,
@@ -21,8 +22,6 @@ from features import (
     portfolio_backtest,
     portfolio_value,
     rolling_sharpe,
-    REBALANCE_MONTHLY,
-    REBALANCE_NONE,
 )
 
 
