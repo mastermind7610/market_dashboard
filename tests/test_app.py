@@ -187,11 +187,24 @@ class OfflinePageTests(unittest.TestCase):
         self.assertEqual(list(page.exception), [])
         self.assertIn("must be shorter than the long average", page.error[0].value)
 
-    def test_a_symbol_the_offline_demo_lacks_is_dropped_from_a_link(self) -> None:
-        page = _page(data="Offline", symbols=["NVDA"])
+    def test_a_symbol_the_offline_demo_lacks_is_named_in_a_notice(self) -> None:
+        page = _page(data="Offline", symbols=["NVDA", "ZZZNOTREAL", "AAPL"])
         self.assertEqual(list(page.exception), [])
         self.assertEqual(page.sidebar.multiselect(key="symbols").value, ["AAPL"])
         self.assertEqual(page.title[0].value, "AAPL vs SPY")
+        notes = " ".join(note.value for note in page.info)
+        self.assertIn("NVDA", notes)
+        self.assertIn("ZZZNOTREAL", notes)
+        self.assertIn("not in the offline demo", notes)
+        self.assertIn("Bundled data covers AAPL, MSFT, SPY, QQQ", notes)
+
+    def test_an_unavailable_offline_benchmark_is_named_in_a_notice(self) -> None:
+        page = _page(data="Offline", symbols=["AAPL"], benchmark="DIA")
+        self.assertEqual(list(page.exception), [])
+        self.assertEqual(page.sidebar.selectbox(key="benchmark").value, "SPY")
+        notes = " ".join(note.value for note in page.info)
+        self.assertIn("Benchmark DIA is not available offline", notes)
+        self.assertIn("SPY is used instead", notes)
 
     def test_clearing_every_symbol_asks_for_one(self) -> None:
         page = _page(data="Offline")
@@ -239,6 +252,30 @@ class LivePageWithStubbedYahooTests(unittest.TestCase):
         warnings = " ".join(note.value for note in page.warning)
         self.assertIn("ZZZNOTREAL was left out", warnings)
         self.assertIn("No price history for ZZZNOTREAL", warnings)
+
+    def test_in_focus_only_lists_symbols_that_loaded(self) -> None:
+        with patch("data_loader._download_yahoo", self._download(("AAPL", "MSFT", "SPY"))):
+            page = _page(symbols=["AAPL", "MSFT", "ZZZNOTREAL"])
+        self.assertEqual(list(page.exception), [])
+        self.assertEqual(list(page.error), [])
+        focus = page.button_group(key="focus")
+        self.assertEqual(list(focus.options), ["AAPL", "MSFT"])
+        self.assertNotIn("ZZZNOTREAL", focus.options)
+        warnings = " ".join(note.value for note in page.warning)
+        self.assertIn("ZZZNOTREAL was left out", warnings)
+        self.assertEqual(page.title[0].value, "AAPL, MSFT vs SPY")
+
+    def test_switching_to_offline_names_the_symbols_that_were_dropped(self) -> None:
+        with patch("data_loader._download_yahoo", self._download(("AAPL", "NVDA", "SPY"))):
+            page = _page(symbols=["AAPL", "NVDA"])
+            self.assertEqual(page.sidebar.multiselect(key="symbols").value, ["AAPL", "NVDA"])
+            page.sidebar.radio(key="data").set_value("Offline").run()
+        self.assertEqual(list(page.exception), [])
+        self.assertEqual(page.sidebar.multiselect(key="symbols").value, ["AAPL"])
+        notes = " ".join(note.value for note in page.info)
+        self.assertIn("NVDA", notes)
+        self.assertIn("not in the offline demo", notes)
+        self.assertIn("Bundled data covers AAPL, MSFT, SPY, QQQ", notes)
 
     def test_only_unknown_tickers_is_an_error_with_a_way_out(self) -> None:
         with patch("data_loader._download_yahoo", self._download(("SPY",))):

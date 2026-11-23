@@ -16,9 +16,11 @@ import pandas as pd
 from dashboard import MAX_SYMBOLS, main, resolve_symbols, run_briefing
 from data_loader import (
     CACHE_TTL_HOURS,
+    DOWNLOAD_ATTEMPTS,
     OFFLINE_BENCHMARKS,
     MarketDataError,
     fetch_history,
+    filter_offline_selection,
     load_offline_histories,
     load_offline_history,
     load_prices,
@@ -357,6 +359,69 @@ class MultiSymbolTests(unittest.TestCase):
                 with self.assertRaises(MarketDataError) as caught:
                     run_briefing(tickers=["AAPL"], cache_dir=temp_dir)
         self.assertIn("No price history for AAPL", str(caught.exception))
+
+
+
+class DownloadRetryTests(unittest.TestCase):
+    def test_a_failed_download_is_retried_then_succeeds(self) -> None:
+        frame = load_prices()
+        calls = {"n": 0}
+
+        def flaky(ticker: str) -> pd.DataFrame:
+            calls["n"] += 1
+            if calls["n"] < DOWNLOAD_ATTEMPTS:
+                raise MarketDataError(f"No price history for {ticker}. Yahoo Finance returned nothing.")
+            out = frame.copy()
+            out.attrs["ticker"] = ticker
+            return out
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("data_loader._download_yahoo_once", flaky), patch("data_loader.time.sleep") as sleeper:
+                history = fetch_history("AAPL", refresh=True, cache_dir=temp_dir)
+        self.assertEqual(calls["n"], DOWNLOAD_ATTEMPTS)
+        self.assertEqual(sleeper.call_count, DOWNLOAD_ATTEMPTS - 1)
+        self.assertEqual(len(history.frame), len(frame))
+        self.assertFalse(history.stale)
+
+    def test_a_failed_download_is_not_written_to_the_cache(self) -> None:
+        def down(ticker: str) -> pd.DataFrame:
+            raise MarketDataError(f"No price history for {ticker}. Yahoo Finance returned nothing.")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("data_loader._download_yahoo_once", down), patch("data_loader.time.sleep"):
+                with self.assertRaises(MarketDataError):
+                    fetch_history("AAPL", refresh=True, cache_dir=temp_dir)
+            self.assertEqual(list(Path(temp_dir).iterdir()), [])
+
+    def test_an_empty_frame_is_refused_by_the_cache_writer(self) -> None:
+        from data_loader import _write_cache
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(MarketDataError) as caught:
+                _write_cache("AAPL", pd.DataFrame(), pd.Timestamp("2026-01-01", tz="UTC"), Path(temp_dir))
+            self.assertEqual(list(Path(temp_dir).iterdir()), [])
+        self.assertIn("Refusing to cache an empty", str(caught.exception))
+
+
+class OfflineSelectionTests(unittest.TestCase):
+    def test_unavailable_symbols_and_benchmark_are_named(self) -> None:
+        kept, bench, notes = filter_offline_selection(
+            ["AAPL", "NVDA", "zzznotreal", "AAPL"], "DIA"
+        )
+        self.assertEqual(kept, ["AAPL"])
+        self.assertEqual(bench, "SPY")
+        text = " ".join(notes)
+        self.assertIn("NVDA", text)
+        self.assertIn("ZZZNOTREAL", text)
+        self.assertIn("Bundled data covers AAPL, MSFT, SPY, QQQ", text)
+        self.assertIn("Benchmark DIA is not available offline", text)
+        self.assertIn("SPY is used instead", text)
+
+    def test_all_unavailable_falls_back_to_aapl(self) -> None:
+        kept, bench, notes = filter_offline_selection(["NVDA", "TSLA"], "QQQ")
+        self.assertEqual(kept, ["AAPL"])
+        self.assertEqual(bench, "QQQ")
+        self.assertTrue(any("NVDA" in note and "TSLA" in note for note in notes))
 
 
 class LiveYahooTests(unittest.TestCase):

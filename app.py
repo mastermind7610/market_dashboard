@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import html
 from datetime import date, timedelta
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import streamlit as st
 
@@ -33,6 +33,7 @@ from data_loader import (
     CACHE_TTL_HOURS,
     OFFLINE_BENCHMARKS,
     MarketDataError,
+    filter_offline_selection,
     offline_span,
     offline_symbols,
     search_symbols,
@@ -164,10 +165,119 @@ PAGE_CSS = """
 # ---------------------------------------------------------------------------
 
 
-def _reset_selection() -> None:
-    """Live and offline offer different symbols and dates, so a mode switch starts clean."""
-    for key in SELECTION_KEYS:
+def _on_data_mode_change() -> None:
+    """
+    Live and offline offer different symbols and dates.
+
+    Switching to Offline keeps what the offline demo can serve and
+    records a notice naming anything that was dropped, including a
+    benchmark that is not SPY or QQQ. Switching to Live clears that
+    notice and leaves the current selection alone.
+    """
+    for key in ("focus", "start", "end"):
         st.session_state.pop(key, None)
+    if st.session_state.get("data") != OFFLINE:
+        st.session_state.pop("offline_drop_notes", None)
+        st.session_state.pop("offline_intent_symbols", None)
+        st.session_state.pop("offline_intent_benchmark", None)
+        return
+    requested = list(st.session_state.get("symbols") or [])
+    requested.extend(_symbols_named_in_query())
+    benchmark = (
+        st.session_state.get("benchmark")
+        or _benchmark_named_in_query()
+        or DEFAULT_BENCHMARK
+    )
+    kept, bench, notes = filter_offline_selection(requested, benchmark)
+    st.session_state.symbols = kept
+    st.session_state.benchmark = bench
+    st.session_state.offline_drop_notes = list(notes)
+
+
+def _capture_offline_intent() -> None:
+    """
+    Remember symbols and benchmark named in the URL before the offline
+    widgets drop values they cannot hold. Bound widgets remove unknown
+    options from the query string during the run; reading first keeps
+    enough to name what was left out.
+    """
+    mode = st.query_params.get("data") or st.session_state.get("data")
+    if mode != OFFLINE:
+        return
+    if st.session_state.get("offline_intent_captured"):
+        return
+    symbols = _symbols_named_in_query()
+    bench = _benchmark_named_in_query()
+    if symbols:
+        st.session_state.offline_intent_symbols = symbols
+    if bench:
+        st.session_state.offline_intent_benchmark = bench
+    st.session_state.offline_intent_captured = True
+
+
+def _symbols_named_in_query() -> list[str]:
+    """Symbols named in the query string, including ones offline will refuse."""
+    values = list(st.query_params.get_all("symbols") or [])
+    address = st.context.url or ""
+    if address:
+        values.extend(parse_qs(urlsplit(address).query).get("symbols", []))
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value).strip().upper()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _benchmark_named_in_query() -> str | None:
+    value = st.query_params.get("benchmark")
+    if value:
+        text = str(value).strip().upper()
+        if text:
+            return text
+    address = st.context.url or ""
+    if not address:
+        return None
+    values = parse_qs(urlsplit(address).query).get("benchmark", [])
+    if not values:
+        return None
+    text = str(values[0]).strip().upper()
+    return text or None
+
+
+def _apply_offline_filter(symbols: list[str], benchmark: str) -> tuple[list[str], str, tuple[str, ...]]:
+    """
+    Drop symbols (and a benchmark) the offline demo cannot serve, and
+    remember the notice for the main page. Uses the URL intent captured
+    before widgets ran, so a link that names NVDA still produces a message.
+    """
+    requested = list(
+        dict.fromkeys(
+            [
+                *[str(s).strip().upper() for s in symbols if str(s).strip()],
+                *list(st.session_state.get("offline_intent_symbols") or []),
+                *_symbols_named_in_query(),
+            ]
+        )
+    )
+    intent_bench = st.session_state.get("offline_intent_benchmark")
+    kept, bench, notes = filter_offline_selection(
+        requested, intent_bench or _benchmark_named_in_query() or benchmark
+    )
+    previous = tuple(st.session_state.get("offline_drop_notes") or ())
+    st.session_state.offline_drop_notes = list(notes or previous)
+    # An intentional empty multiselect must stay empty; only fill AAPL when
+    # something was requested and nothing offline-available remained.
+    widget_empty = not [str(s).strip() for s in symbols if str(s).strip()]
+    if widget_empty and not (
+        st.session_state.get("offline_intent_symbols") or _symbols_named_in_query()
+    ):
+        kept = []
+    if list(st.session_state.get("symbols") or []) != kept:
+        st.session_state.symbols = kept
+    if kept and st.session_state.get("benchmark") != bench:
+        st.session_state.benchmark = bench
+    return kept, (bench if kept else benchmark), tuple(st.session_state.offline_drop_notes)
 
 
 def _tidy_symbols() -> None:
@@ -204,7 +314,7 @@ def _mode() -> bool:
         captions=MODE_CAPTIONS,
         key="data",
         bind=BOUND,
-        on_change=_reset_selection,
+        on_change=_on_data_mode_change,
         help="Live data is Yahoo Finance. The offline demo reads only the files shipped with this app.",
     )
     offline = mode == OFFLINE
@@ -221,6 +331,16 @@ def _symbol_picker(offline: bool) -> list[str]:
     if offline:
         options = list(offline_symbols())
         guidance = "The offline demo ships these four files."
+        # Bound widgets drop values that are not in options. Align session
+        # state first so the multiselect opens on what offline can show.
+        current = [str(s).strip().upper() for s in (st.session_state.get("symbols") or []) if str(s).strip()]
+        intent = list(st.session_state.get("offline_intent_symbols") or [])
+        kept, _, _ = filter_offline_selection(
+            current or intent or _symbols_named_in_query(),
+            st.session_state.get("benchmark") or st.session_state.get("offline_intent_benchmark"),
+        )
+        if current or intent or _symbols_named_in_query():
+            st.session_state.symbols = kept
     else:
         chosen = st.session_state.get("symbols") or []
         options = list(dict.fromkeys([*POPULAR, *chosen]))
@@ -242,13 +362,21 @@ def _symbol_picker(offline: bool) -> list[str]:
 def _benchmark_picker(offline: bool) -> str:
     if offline:
         options = list(OFFLINE_BENCHMARKS)
+        current = (
+            st.session_state.get("benchmark")
+            or st.session_state.get("offline_intent_benchmark")
+            or _benchmark_named_in_query()
+            or DEFAULT_BENCHMARK
+        )
+        _, bench, _ = filter_offline_selection(st.session_state.get("symbols") or [], current)
+        st.session_state.benchmark = bench
     else:
         chosen = st.session_state.get("benchmark")
         options = list(dict.fromkeys([*BENCHMARK_CHOICES, *([chosen] if chosen else [])]))
     picked = st.sidebar.selectbox(
         "Benchmark",
         options,
-        index=options.index(DEFAULT_BENCHMARK),
+        index=options.index(DEFAULT_BENCHMARK) if DEFAULT_BENCHMARK in options else 0,
         key="benchmark",
         accept_new_options=not offline,
         bind=BOUND,
@@ -317,9 +445,18 @@ def _settings() -> dict:
 
 def _sidebar() -> dict:
     st.sidebar.header("Briefing")
+    _capture_offline_intent()
     offline = _mode()
     symbols = _symbol_picker(offline)
     benchmark = _benchmark_picker(offline)
+    notes: tuple[str, ...] = ()
+    if offline:
+        symbols, benchmark, notes = _apply_offline_filter(symbols, benchmark)
+    else:
+        st.session_state.pop("offline_drop_notes", None)
+        st.session_state.pop("offline_intent_symbols", None)
+        st.session_state.pop("offline_intent_benchmark", None)
+        st.session_state.pop("offline_intent_captured", None)
     if not offline:
         _symbol_search()
     settings = _settings()
@@ -334,7 +471,14 @@ def _sidebar() -> dict:
         "Zooming a chart, or pressing a chart's range buttons, changes the view only. "
         "The metrics use the range selected above the briefing."
     )
-    return {"offline": offline, "symbols": symbols, "benchmark": benchmark, "refresh": refresh, **settings}
+    return {
+        "offline": offline,
+        "symbols": symbols,
+        "benchmark": benchmark,
+        "refresh": refresh,
+        "offline_notes": notes,
+        **settings,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +549,9 @@ def _title(symbols: list[str], benchmark: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _warnings(briefing) -> None:
+def _warnings(briefing, offline_notes: tuple[str, ...] = ()) -> None:
+    for note in offline_notes:
+        st.info(note)
     for note in briefing.notes:
         st.info(note)
     for symbol, reason in briefing.failed.items():
@@ -687,24 +833,43 @@ def main() -> None:
         "a window you choose, and see how closely it moved with the benchmark on the dates both traded."
     )
     request.update(_range_picker(request["offline"]))
+    offline_notes = tuple(request.get("offline_notes") or ())
     if not request["symbols"]:
+        for note in offline_notes:
+            st.info(note)
         st.info("Add at least one symbol in the sidebar to build a briefing.")
         return
-    request["focus"] = _focus_picker(request["symbols"], request["benchmark"])
+    # Prefer a focus the user already chose; the dashboard falls back if
+    # that symbol failed to load. The picker below only offers loaded ones.
+    request["focus"] = st.session_state.get("focus")
 
     try:
         briefing = _brief(request)
     except MarketDataError as exc:
+        for note in offline_notes:
+            st.info(note)
         st.error(str(exc))
         if not request["offline"]:
             st.info("The offline demo is available under Data in the sidebar. It does not use the network.")
         return
     except AnalysisError as exc:
+        for note in offline_notes:
+            st.info(note)
         st.error(str(exc))
         return
 
-    headline.title(_title(list(briefing.reports), request["benchmark"]))
-    _warnings(briefing)
+    loaded = list(briefing.reports)
+    chosen = _focus_picker(loaded, request["benchmark"])
+    if chosen and chosen != briefing.focus:
+        # The picker only lists symbols that loaded; rebuild so the cards,
+        # sentences and single-symbol charts match the new focus.
+        briefing = _brief({**request, "symbols": loaded, "focus": chosen})
+        loaded = list(briefing.reports)
+    request["focus"] = chosen or briefing.focus
+    request["symbols"] = loaded
+
+    headline.title(_title(loaded, request["benchmark"]))
+    _warnings(briefing, offline_notes=offline_notes)
     _status(briefing)
     _metrics(briefing.report.stats)
     _table(briefing)

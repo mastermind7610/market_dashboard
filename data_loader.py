@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +38,11 @@ CACHE_DIR = ROOT / ".cache"
 # A fresh download is reused for this long. The on-screen "fetched"
 # time stays at the original download, not the moment the cache was read.
 CACHE_TTL_HOURS = 12
+# Yahoo occasionally returns an empty frame on a cold Community Cloud
+# start. A short backoff usually clears it without asking the user to
+# click Refresh. Empty responses are never written to the cache.
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_DELAYS_SECONDS = (0.8, 1.6)
 
 YAHOO_SOURCE = "Yahoo Finance via yfinance (auto-adjusted OHLC)"
 OFFLINE_AAPL_SOURCE = (
@@ -162,6 +168,68 @@ def offline_symbols() -> tuple[str, ...]:
     return tuple(OFFLINE_BUNDLE)
 
 
+def filter_offline_selection(
+    symbols: list[str] | tuple[str, ...] | None,
+    benchmark: str | None,
+    *,
+    default_symbol: str = "AAPL",
+    default_benchmark: str = "SPY",
+) -> tuple[list[str], str, tuple[str, ...]]:
+    """
+    Keep only symbols and a benchmark the offline demo can serve.
+
+    Returns the kept symbols, the benchmark to use, and plain-English
+    notes naming anything that was dropped. An empty keep-list falls
+    back to ``default_symbol`` so the page still has something to show.
+    """
+    bundled = offline_symbols()
+    bundled_set = set(bundled)
+    cleaned: list[str] = []
+    for raw in symbols or []:
+        text = str(raw).strip().upper()
+        if not text or text in cleaned:
+            continue
+        cleaned.append(text)
+
+    dropped = [symbol for symbol in cleaned if symbol not in bundled_set]
+    kept = [symbol for symbol in cleaned if symbol in bundled_set]
+    notes: list[str] = []
+    if dropped:
+        names = ", ".join(dropped)
+        verb = "is" if len(dropped) == 1 else "are"
+        were = "was" if len(dropped) == 1 else "were"
+        notes.append(
+            f"{names} {verb} not in the offline demo and {were} left out. "
+            f"Bundled data covers {', '.join(bundled)}."
+        )
+    # Fall back to a bundled default only when something was requested and
+    # nothing usable remained. An empty request stays empty so the page can
+    # ask the user to add a symbol.
+    if not kept and cleaned:
+        kept = [default_symbol]
+
+    try:
+        bench = normalize_symbol(benchmark) if benchmark else default_benchmark
+    except MarketDataError:
+        bench = str(benchmark or default_benchmark).strip().upper() or default_benchmark
+    if bench not in OFFLINE_BENCHMARKS:
+        notes.append(
+            f"Benchmark {bench} is not available offline, so {default_benchmark} is used instead. "
+            f"Offline benchmarks are {', '.join(OFFLINE_BENCHMARKS)}."
+        )
+        bench = default_benchmark
+    # A symbol that is also the benchmark is removed from the compare list
+    # with the same rule the live path uses.
+    if bench in kept and len(kept) > 1:
+        kept = [symbol for symbol in kept if symbol != bench]
+    elif kept == [bench]:
+        notes.append(
+            f"{bench} is the benchmark, so {default_symbol} is shown instead of comparing it with itself."
+        )
+        kept = [default_symbol]
+    return kept, bench, tuple(notes)
+
+
 def load_offline_history(symbol: str) -> PriceHistory:
     """One bundled symbol. No network. Anything else is a clear error."""
     ticker = normalize_symbol(symbol)
@@ -271,7 +339,25 @@ def slice_history(frame: pd.DataFrame, start, end) -> pd.DataFrame:
 
 
 def _download_yahoo(ticker: str) -> pd.DataFrame:
-    """Full available daily history. Empty responses become MarketDataError."""
+    """
+    Full available daily history, with a short retry on empty or failed
+    answers. Only a non-empty frame is returned; the caller is the only
+    place that writes the cache, so a failed attempt never pollutes it.
+    """
+    last_error: MarketDataError | None = None
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            return _download_yahoo_once(ticker)
+        except MarketDataError as exc:
+            last_error = exc
+        if attempt < DOWNLOAD_ATTEMPTS - 1:
+            time.sleep(DOWNLOAD_RETRY_DELAYS_SECONDS[attempt])
+    assert last_error is not None
+    raise last_error
+
+
+def _download_yahoo_once(ticker: str) -> pd.DataFrame:
+    """One Yahoo attempt. Empty responses become MarketDataError."""
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
     try:
         import yfinance as yf
@@ -403,6 +489,12 @@ def _write_cache(
     fetched_at: pd.Timestamp,
     directory: Path,
 ) -> None:
+    # An empty frame must never be saved: a cold-start miss would then
+    # be replayed for the whole TTL and look like a permanent failure.
+    if frame is None or frame.empty:
+        raise MarketDataError(
+            f"Refusing to cache an empty price history for {ticker}."
+        )
     directory.mkdir(parents=True, exist_ok=True)
     csv_path, meta_path = _cache_paths(ticker, directory)
     frame.to_csv(csv_path)

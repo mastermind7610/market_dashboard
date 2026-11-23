@@ -122,10 +122,12 @@ Other cases, each with its own message:
 
 - **A range with one trading day**: "AAPL has 1 trading day(s) between … A return needs two adjusted closes. Widen the range."
 - **A range too short for a figure**: that card shows a dash and its question mark says what it needs. Annualized return needs 360 calendar days, Sharpe, Sortino, beta and correlation need 20 daily returns, and each capture ratio needs 10 days on its side.
-- **Yahoo not answering**: a download that is older than 12 hours is used if one is on disk, and the page says the prices are from an older download and when it was fetched. With nothing on disk, the page shows the error and the offline demo is one click away.
+- **Yahoo not answering**: the download is tried up to three times with a short backoff (empty answers are never cached). If it still fails, a download older than 12 hours is used when one is on disk, and the page says so. With nothing on disk, the page shows the error and the offline demo is one click away.
 - **Benchmark unavailable**: the stock figures still show, and the benchmark cards show a dash.
 - **Moving averages in the wrong order**: "The short average (300 days) must be shorter than the long average (100 days)."
 - **The benchmark is also in the symbol list**: it is removed from the list with a note.
+- **Offline drops a live-only symbol**: switching to Offline, or opening an offline link that names NVDA or another symbol outside the bundle, keeps what the demo can serve and shows a notice naming what was left out (bundled data covers AAPL, MSFT, SPY, QQQ). The same happens for a benchmark that is not SPY or QQQ.
+- **In focus**: only symbols that actually loaded appear in the selector. A ticker that was left out is not offered.
 
 ### Command line
 
@@ -227,12 +229,12 @@ Live OHLC from Yahoo is fetched with `auto_adjust=True`, so every symbol is adju
 python -m unittest discover -s tests -v
 ```
 
-96 tests.
+104 tests.
 
 - `tests/test_calculations.py` (11): hand-computed returns, the annualized-volatility formula, a known peak-to-trough drawdown (−25% from 120 to 90), moving-average warmup, date alignment without filling gaps, and a jumpy window labelled elevated against a calm history.
 - `tests/test_metrics.py` (45): known answers for annualized return, the daily risk-free rate, Sharpe, downside deviation, Sortino, beta, correlation, up and down capture, best and worst day, rolling beta and correlation, monthly returns and their table, adjusted candles, rebasing and shared sessions, each label cut, and the settings limits. Edge cases: a part-year window, too few returns, a flat series, no losing days, a benchmark that never moved, too few up or down days, windows in the wrong order. One case builds a stock that moves exactly twice the benchmark each day and checks beta 2, correlation 1 and capture 200% through the whole pipeline.
-- `tests/test_pipeline.py` (23): the four bundled files, offline briefings, several symbols against a chosen benchmark, one bad symbol among several, every symbol bad, the benchmark listed as a symbol, more than five symbols, a symbol with no sessions in the range, settings passed through and rejected, the disk cache, an outage served from an expired download and an outage with nothing on disk, the command line, and live Yahoo fetches (skipped if Yahoo is unreachable).
-- `tests/test_app.py` (17): the page itself, driven headless with Streamlit's `AppTest`. The cards match the calculation, a link reproduces a multi-symbol view and the page writes the same link back, a custom range, a one-day range, changing the range, the focus and the benchmark, averages in the wrong order, a symbol the offline demo lacks, an empty symbol list, and live mode with the download stubbed: one unknown ticker, only unknown tickers, an outage, a missing benchmark.
+- `tests/test_pipeline.py` (28): the four bundled files, offline briefings, several symbols against a chosen benchmark, one bad symbol among several, every symbol bad, the benchmark listed as a symbol, more than five symbols, a symbol with no sessions in the range, settings passed through and rejected, the disk cache, an outage served from an expired download and an outage with nothing on disk, download retries that never cache an empty frame, offline selection notices, the command line, and live Yahoo fetches (skipped if Yahoo is unreachable).
+- `tests/test_app.py` (20): the page itself, driven headless with Streamlit's `AppTest`. The cards match the calculation, a link reproduces a multi-symbol view and the page writes the same link back, a custom range, a one-day range, changing the range, the focus and the benchmark, averages in the wrong order, offline drop notices for missing symbols and benchmarks, an empty symbol list, In focus listing only symbols that loaded, switching Live→Offline naming dropped tickers, and live mode with the download stubbed: one unknown ticker, only unknown tickers, an outage, a missing benchmark.
 
 ## Layout
 
@@ -248,7 +250,7 @@ app.py           the page
 
 ## Known limitations
 
-- The live path needs Yahoo Finance to answer. There is no key, and there is also no contract. If Yahoo changes or rate-limits the request, the page falls back to an older download when one is on disk and otherwise shows the error. On Streamlit Community Cloud the disk is wiped when the app restarts, so that fallback only covers symbols loaded since the last restart.
+- The live path needs Yahoo Finance to answer. There is no key, and there is also no contract. A cold start that returns nothing is retried automatically a few times before the page gives up; empty answers are not cached. If it still fails, the page falls back to an older download when one is on disk and otherwise shows the error. On Streamlit Community Cloud the disk is wiped when the app restarts, so that fallback only covers symbols loaded since the last restart.
 - yfinance 0.2.66 prints pandas deprecation warnings under pandas 3.1. The downloads used here still return adjusted history.
 - The risk-free rate is one number you set, 0% by default. It is not a Treasury bill series. Sharpe and Sortino at 0% are higher than a fact sheet's when rates are above zero.
 - Sharpe, Sortino, beta and capture are computed from daily returns. Portfolio Visualizer and fund fact sheets use monthly returns, so their figures for the same period will differ.
