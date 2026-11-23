@@ -74,6 +74,7 @@ ROLLING_VOL_WINDOW = 21
 # About three months of sessions: long enough for a stable regression
 # slope, short enough that the line still moves when the relationship does.
 ROLLING_BETA_WINDOW = 63
+ROLLING_SHARPE_WINDOW = ROLLING_BETA_WINDOW
 VOL_QUIET_PERCENTILE = 0.20
 VOL_ELEVATED_PERCENTILE = 0.80
 MIN_RETURNS_FOR_VOL = 2
@@ -110,6 +111,11 @@ REBALANCE_OPTIONS = (REBALANCE_NONE, REBALANCE_MONTHLY, REBALANCE_QUARTERLY)
 # Weights that sum within half a percentage point are treated as intentional
 # and renormalized. Larger gaps get the same treatment with an explicit note.
 WEIGHT_SUM_TOLERANCE = 0.005
+# Transaction cost as a fraction of traded notional. 10 bps = 0.001.
+DEFAULT_COST_BPS = 0.0
+COST_BPS_MIN = 0.0
+COST_BPS_MAX = 100.0
+BPS_PER_UNIT = 10_000.0
 
 PRESETS = ("1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "Max")
 _PRESET_MONTHS = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
@@ -186,6 +192,13 @@ class PeriodStats:
     up_days: int
     down_days: int
     value_at_risk_95: float | None
+    parametric_var_95: float | None
+    cvar_95: float | None
+    alpha: float | None
+    drawdown_days_to_trough: int | None
+    drawdown_days_to_recovery: int | None
+    drawdown_recovered: bool | None
+    longest_underwater_days: int | None
 
 
 @dataclass(frozen=True)
@@ -203,6 +216,8 @@ class ChartData:
     rolling_correlation: pd.Series | None
     aligned: pd.DataFrame | None
     calendar_years: pd.Series
+    rolling_sharpe: pd.Series | None = None
+    rolling_sortino: pd.Series | None = None
 
 
 @dataclass(frozen=True)
@@ -214,6 +229,29 @@ class PeriodReport:
 
 
 @dataclass(frozen=True)
+class DiversificationStats:
+    """How a weight mix spreads risk across the selected symbols."""
+
+    weights: dict[str, float]
+    diversification_ratio: float | None
+    effective_n: float | None
+    risk_contribution: dict[str, float]
+    portfolio_volatility: float | None
+    weighted_avg_volatility: float | None
+
+
+@dataclass(frozen=True)
+class PortfolioCostReport:
+    """Turnover and fees from a cost-aware portfolio path."""
+
+    cost_bps: float
+    total_turnover: float
+    total_cost_drag: float
+    rebalance_count: int
+    average_turnover: float
+
+
+@dataclass(frozen=True)
 class Comparison:
     """Several symbols over one requested range, optional portfolio, plus the benchmark."""
 
@@ -222,6 +260,8 @@ class Comparison:
     rebased: pd.DataFrame | None
     sentences: tuple[str, ...]
     portfolio: str | None = None
+    correlation_matrix: pd.DataFrame | None = None
+    diversification: DiversificationStats | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -545,11 +585,14 @@ def sortino_ratio(returns: pd.Series, risk_free: float = DEFAULT_RISK_FREE) -> f
 
 def max_drawdown(prices: pd.Series) -> dict:
     """
-    Deepest peak-to-trough decline inside ``prices``.
+    Deepest peak-to-trough decline inside ``prices``, with recovery timing.
 
     The running peak is the maximum adjusted close up to each day. The
     trough is the day that ratio is smallest. The peak date is the day
-    that running peak was last set on or before the trough.
+    that running peak was last set on or before the trough. Recovery is
+    the first later session that closes at or above the peak price.
+    Longest underwater is the longest run of sessions with a negative
+    drawdown (price below its running peak).
     """
     series = prices.astype(float).dropna()
     if series.empty:
@@ -561,12 +604,63 @@ def max_drawdown(prices: pd.Series) -> dict:
     peak_level = float(running_peak.loc[trough])
     at_peak = series.loc[:trough] >= peak_level - 1e-9
     peak = series.loc[:trough].loc[at_peak].index[-1]
+    peak_price = float(series.loc[peak])
+    peak_pos = int(series.index.get_loc(peak))
+    trough_pos = int(series.index.get_loc(trough))
+    if isinstance(peak_pos, slice):
+        peak_pos = peak_pos.start
+    if isinstance(trough_pos, slice):
+        trough_pos = trough_pos.start
+    days_to_trough = max(trough_pos - peak_pos, 0)
+    after = series.iloc[trough_pos:]
+    recovered_mask = after >= peak_price - 1e-9
+    recovered = after.loc[recovered_mask]
+    if abs(depth) < _EPSILON:
+        recovery = trough
+        days_to_recovery = 0
+        did_recover = True
+    elif recovered.empty:
+        recovery = None
+        days_to_recovery = None
+        did_recover = False
+    else:
+        # Skip the trough itself when it is still below the peak.
+        first_idx = recovered.index[0]
+        if first_idx == trough and len(recovered) > 1:
+            first_idx = recovered.index[1]
+        elif first_idx == trough:
+            recovery = None
+            days_to_recovery = None
+            did_recover = False
+            first_idx = None
+        if first_idx is not None:
+            recovery = first_idx
+            recovery_pos = int(series.index.get_loc(recovery))
+            if isinstance(recovery_pos, slice):
+                recovery_pos = recovery_pos.start
+            days_to_recovery = max(recovery_pos - trough_pos, 0)
+            did_recover = True
+    underwater = (drawdown < -_EPSILON).astype(int)
+    longest = 0
+    run = 0
+    for flag in underwater.to_numpy():
+        if flag:
+            run += 1
+            if run > longest:
+                longest = run
+        else:
+            run = 0
     return {
         "max_drawdown": depth,
-        "peak": pd.Timestamp(peak),
-        "trough": pd.Timestamp(trough),
-        "peak_price": float(series.loc[peak]),
+        "peak": pd.Timestamp(peak) if isinstance(peak, pd.Timestamp) or hasattr(peak, "date") else peak,
+        "trough": pd.Timestamp(trough) if isinstance(trough, pd.Timestamp) or hasattr(trough, "date") else trough,
+        "peak_price": peak_price,
         "trough_price": float(series.loc[trough]),
+        "days_to_trough": days_to_trough,
+        "days_to_recovery": days_to_recovery,
+        "recovered": did_recover,
+        "recovery": recovery,
+        "longest_underwater_days": int(longest),
         "series": drawdown,
     }
 
@@ -816,6 +910,190 @@ def historical_var(returns: pd.Series, *, confidence: float = VAR_CONFIDENCE) ->
     return float(max(-tail, 0.0))
 
 
+def parametric_var(returns: pd.Series, *, confidence: float = VAR_CONFIDENCE) -> float:
+    """
+    95% parametric (Gaussian) VaR as a positive loss fraction.
+
+    Uses the sample mean and sample standard deviation of daily simple
+    returns. VaR = −(μ + z_{1−c} σ), floored at zero. z comes from the
+    standard normal inverse CDF via ``statistics.NormalDist``.
+    """
+    from statistics import NormalDist
+
+    if not 0.5 < confidence < 1.0:
+        raise AnalysisError("VaR confidence must sit between 50% and 100%.")
+    clean = _finite(returns)
+    if len(clean) < MIN_RETURNS_FOR_VAR:
+        raise AnalysisError(
+            f"Parametric VaR needs at least {MIN_RETURNS_FOR_VAR} daily returns."
+        )
+    mean = float(clean.mean())
+    std = float(clean.std(ddof=1))
+    if std <= _EPSILON:
+        return float(max(-mean, 0.0))
+    z = NormalDist().inv_cdf(1.0 - confidence)
+    return float(max(-(mean + z * std), 0.0))
+
+
+def conditional_var(returns: pd.Series, *, confidence: float = VAR_CONFIDENCE) -> float:
+    """
+    95% historical Conditional VaR (expected shortfall).
+
+    The mean of daily simple returns at or below the left-tail quantile,
+    reported as a positive loss. Needs the same minimum return count as VaR.
+    """
+    if not 0.5 < confidence < 1.0:
+        raise AnalysisError("CVaR confidence must sit between 50% and 100%.")
+    clean = _finite(returns)
+    if len(clean) < MIN_RETURNS_FOR_VAR:
+        raise AnalysisError(
+            f"Conditional VaR needs at least {MIN_RETURNS_FOR_VAR} daily returns."
+        )
+    threshold = float(np.quantile(clean.to_numpy(), 1.0 - confidence))
+    tail = clean[clean <= threshold + 1e-15]
+    if tail.empty:
+        raise AnalysisError("Conditional VaR found no returns in the left tail.")
+    return float(max(-float(tail.mean()), 0.0))
+
+
+def jensen_alpha(
+    stock_returns: pd.Series,
+    benchmark_returns: pd.Series,
+    risk_free: float = DEFAULT_RISK_FREE,
+) -> float:
+    """
+    Annualised Jensen's alpha versus the benchmark.
+
+    Daily alpha is the average stock excess return minus beta times the
+    average benchmark excess return, using the daily risk-free rate
+    ``(1 + annual)^(1/252) − 1``. Annualised as daily_alpha × 252.
+    """
+    pairs = _pairs(stock_returns, benchmark_returns)
+    daily_rf = daily_risk_free(risk_free)
+    stock_excess = pairs["stock"] - daily_rf
+    bench_excess = pairs["benchmark"] - daily_rf
+    variance = float(pairs["benchmark"].var(ddof=1))
+    if variance <= _EPSILON:
+        raise AnalysisError("Alpha is undefined when the benchmark's returns do not vary.")
+    beta_value = float(pairs["stock"].cov(pairs["benchmark"]) / variance)
+    daily_alpha = float(stock_excess.mean() - beta_value * bench_excess.mean())
+    return daily_alpha * TRADING_DAYS
+
+
+def correlation_matrix(returns: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pairwise Pearson correlations of daily simple returns.
+
+    ``returns`` is one column per symbol on shared sessions. Columns that
+    do not vary are left as NaN against every peer.
+    """
+    if returns is None or returns.empty or returns.shape[1] < 1:
+        raise AnalysisError("A correlation matrix needs return columns.")
+    frame = returns.astype(float).dropna(how="any")
+    if len(frame) < MIN_RETURNS_FOR_RATIOS:
+        raise AnalysisError(
+            f"A correlation matrix needs at least {MIN_RETURNS_FOR_RATIOS} shared daily returns."
+        )
+    return frame.corr()
+
+
+def diversification_stats(
+    returns: pd.DataFrame,
+    weights: dict[str, float],
+) -> DiversificationStats:
+    """
+    Diversification ratio, effective number of holdings, and risk contribution.
+
+    Diversification ratio is the weighted average of standalone volatilities
+    divided by the portfolio volatility. Effective N is 1 / Σ w_i².
+    Risk contribution for i is w_i × (Σw)_i / σ_p, as a share of variance.
+    """
+    cleaned, _ = normalize_weights(weights, list(weights))
+    cols = [symbol for symbol in cleaned if symbol in returns.columns]
+    if len(cols) < 1:
+        raise AnalysisError("Diversification analysis needs weights that match return columns.")
+    frame = returns.loc[:, cols].astype(float).dropna(how="any")
+    if len(frame) < MIN_RETURNS_FOR_RATIOS:
+        raise AnalysisError(
+            f"Diversification analysis needs at least {MIN_RETURNS_FOR_RATIOS} shared daily returns."
+        )
+    w = np.array([cleaned[column] for column in cols], dtype=float)
+    # Renormalize to the columns present.
+    w = w / w.sum()
+    weight_map = {column: float(value) for column, value in zip(cols, w)}
+    cov = frame.cov().to_numpy(dtype=float)
+    vols = np.sqrt(np.diag(cov))
+    port_var = float(w @ cov @ w)
+    if port_var <= _EPSILON:
+        raise AnalysisError("Portfolio volatility is zero; diversification ratios are undefined.")
+    port_vol = float(np.sqrt(port_var))
+    weighted_avg = float(w @ vols)
+    ratio = weighted_avg / port_vol if port_vol > _EPSILON else None
+    effective_n = float(1.0 / float(np.sum(w * w)))
+    marginal = cov @ w
+    contrib = w * marginal / port_var
+    risk = {column: float(value) for column, value in zip(cols, contrib)}
+    return DiversificationStats(
+        weights=weight_map,
+        diversification_ratio=ratio,
+        effective_n=effective_n,
+        risk_contribution=risk,
+        portfolio_volatility=port_vol * np.sqrt(TRADING_DAYS),
+        weighted_avg_volatility=weighted_avg * np.sqrt(TRADING_DAYS),
+    )
+
+
+def rolling_sharpe(
+    returns: pd.Series,
+    risk_free: float = DEFAULT_RISK_FREE,
+    window: int = ROLLING_SHARPE_WINDOW,
+) -> pd.Series:
+    """Trailing annualized Sharpe over ``window`` daily simple returns."""
+    clean = returns.astype(float)
+    daily_rf = daily_risk_free(risk_free)
+    excess = clean - daily_rf
+    mean = excess.rolling(window, min_periods=window).mean()
+    std = excess.rolling(window, min_periods=window).std(ddof=1)
+    return (mean / std.where(std > _EPSILON)) * np.sqrt(TRADING_DAYS)
+
+
+def rolling_sortino(
+    returns: pd.Series,
+    risk_free: float = DEFAULT_RISK_FREE,
+    window: int = ROLLING_SHARPE_WINDOW,
+) -> pd.Series:
+    """
+    Trailing annualized Sortino over ``window`` daily simple returns.
+
+    Downside deviation uses the same definition as ``downside_deviation``:
+    squared shortfalls below the daily risk-free rate, including zeros for
+    non-shortfall days, with every day of the window in the divisor.
+    """
+    clean = returns.astype(float)
+    daily_rf = daily_risk_free(risk_free)
+    excess = clean - daily_rf
+    mean = excess.rolling(window, min_periods=window).mean()
+
+    def _downside(values: np.ndarray) -> float:
+        shortfall = np.minimum(values - daily_rf, 0.0)
+        return float(np.sqrt(np.mean(shortfall * shortfall)))
+
+    downside = clean.rolling(window, min_periods=window).apply(_downside, raw=True)
+    return (mean / downside.where(downside > _EPSILON)) * np.sqrt(TRADING_DAYS)
+
+
+def validate_cost_bps(cost_bps: float) -> float:
+    try:
+        value = float(cost_bps)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisError("Transaction cost must be a number of basis points.") from exc
+    if value < COST_BPS_MIN or value > COST_BPS_MAX:
+        raise AnalysisError(
+            f"Transaction cost must sit between {COST_BPS_MIN:g} and {COST_BPS_MAX:g} bps."
+        )
+    return value
+
+
 def calendar_year_returns(prices: pd.Series) -> pd.Series:
     """
     Cumulative return inside each calendar year of ``prices``.
@@ -922,15 +1200,35 @@ def portfolio_value(
     weights: dict[str, float],
     *,
     rebalance: str = REBALANCE_NONE,
+    cost_bps: float = DEFAULT_COST_BPS,
 ) -> pd.Series:
+    """Portfolio level starting at 1.0. See ``portfolio_backtest`` for costs."""
+    value, _ = portfolio_backtest(prices, weights, rebalance=rebalance, cost_bps=cost_bps)
+    return value
+
+
+def portfolio_backtest(
+    prices: pd.DataFrame,
+    weights: dict[str, float],
+    *,
+    rebalance: str = REBALANCE_NONE,
+    cost_bps: float = DEFAULT_COST_BPS,
+) -> tuple[pd.Series, PortfolioCostReport]:
     """
     Portfolio level starting at 1.0 on the first shared session.
 
     ``prices`` is a column per symbol of adjusted closes on shared dates.
     With no rebalance the opening mix drifts. Monthly or quarterly
     rebalance resets to ``weights`` on the first session of each period.
+
+    ``cost_bps`` is charged on turnover at each rebalance (and once at
+    inception). Turnover for a reset is half the L1 distance between the
+    pre-trade weights and the target weights. Cost drag compounds as
+    value *= (1 − turnover × bps / 10000).
     """
     mode = validate_rebalance(rebalance)
+    bps = validate_cost_bps(cost_bps)
+    cost_rate = bps / BPS_PER_UNIT
     if prices is None or prices.empty:
         raise AnalysisError("A portfolio needs shared price history.")
     missing = [symbol for symbol in weights if symbol not in prices.columns]
@@ -942,23 +1240,51 @@ def portfolio_value(
             "The portfolio needs at least two shared sessions across its symbols."
         )
 
-    # Target weights as a vector aligned to columns.
     target = np.array([weights[column] for column in frame.columns], dtype=float)
     levels = frame.to_numpy(dtype=float)
     value = np.empty(len(frame), dtype=float)
-    holdings = target * 1.0 / levels[0]
-    value[0] = 1.0
+    # Open at target weights; charge inception turnover of 1.0 (fully invested).
+    open_turnover = 1.0
+    open_cost = open_turnover * cost_rate
+    holdings = target * (1.0 - open_cost) / levels[0]
+    value[0] = 1.0 - open_cost
     periods = frame.index.to_period("M" if mode == REBALANCE_MONTHLY else "Q")
+    turnovers = [open_turnover]
+    rebalance_count = 1  # inception counts as the opening trade
 
     for i in range(1, len(frame)):
+        pre_value = float(np.dot(holdings, levels[i]))
         if mode != REBALANCE_NONE and periods[i] != periods[i - 1]:
-            # First session of a new month or quarter: reset to target weights.
-            holdings = target * value[i - 1] / levels[i]
-        value[i] = float(np.dot(holdings, levels[i]))
-        if mode == REBALANCE_NONE:
-            # Buy-and-hold: holdings stay fixed in shares.
-            pass
-    return pd.Series(value, index=frame.index, name=PORTFOLIO_LABEL)
+            # Weights before the reset, from mark-to-market holdings.
+            if pre_value > _EPSILON:
+                current = holdings * levels[i] / pre_value
+            else:
+                current = target.copy()
+            turnover = 0.5 * float(np.sum(np.abs(target - current)))
+            fee = turnover * cost_rate
+            # Zero-cost path keeps the historical rebalance value (value[i-1])
+            # so existing figures stay stable. With costs, mark to market first.
+            base = value[i - 1] if cost_rate <= _EPSILON else pre_value
+            post = base * (1.0 - fee)
+            holdings = target * post / levels[i]
+            value[i] = post
+            turnovers.append(turnover)
+            rebalance_count += 1
+        else:
+            value[i] = pre_value
+    total_turnover = float(sum(turnovers))
+    total_cost = float(1.0 - np.prod([1.0 - t * cost_rate for t in turnovers]))
+    # Prefer the compounded drag implied by the path start: 1 - final_without would
+    # need a twin path; report sum of fee fractions on traded notionals instead.
+    fee_sum = float(sum(t * cost_rate for t in turnovers))
+    report = PortfolioCostReport(
+        cost_bps=bps,
+        total_turnover=total_turnover,
+        total_cost_drag=fee_sum,
+        rebalance_count=int(rebalance_count),
+        average_turnover=total_turnover / max(rebalance_count, 1),
+    )
+    return pd.Series(value, index=frame.index, name=PORTFOLIO_LABEL), report
 
 
 def portfolio_frame(value: pd.Series) -> pd.DataFrame:
@@ -1048,7 +1374,7 @@ def build_period(
 
     risk = _risk_fields(window, full_returns)
     reward = _reward_fields(window, returns, rate)
-    relative, relative_charts = _relative_fields(prices, window, benchmark, benchmark_ticker)
+    relative, relative_charts = _relative_fields(prices, window, benchmark, benchmark_ticker, rate)
 
     years = _optional(calendar_year_returns, window)
     if years is None:
@@ -1069,6 +1395,10 @@ def build_period(
         drawdown_trough=drawdown["trough"],
         drawdown_peak_price=float(drawdown["peak_price"]),
         drawdown_trough_price=float(drawdown["trough_price"]),
+        drawdown_days_to_trough=drawdown["days_to_trough"],
+        drawdown_days_to_recovery=drawdown["days_to_recovery"],
+        drawdown_recovered=drawdown["recovered"],
+        longest_underwater_days=drawdown["longest_underwater_days"],
         ma_short_window=short_window,
         ma_long_window=long_window,
         # The printed average is the value on the last session of the window.
@@ -1076,10 +1406,13 @@ def build_period(
         ma_short=_value_on(ma_short_full, last_day),
         ma_long=_value_on(ma_long_full, last_day),
         value_at_risk_95=_optional(historical_var, returns),
+        parametric_var_95=_optional(parametric_var, returns),
+        cvar_95=_optional(conditional_var, returns),
         **risk,
         **reward,
         **relative,
     )
+    simple_full = daily_simple_returns(prices)
     charts = ChartData(
         price=window,
         ohlc=adjusted_ohlc(history).reindex(window.index),
@@ -1090,6 +1423,8 @@ def build_period(
         returns=returns,
         monthly=monthly_returns(window),
         calendar_years=years,
+        rolling_sharpe=rolling_sharpe(simple_full, rate).reindex(window.index),
+        rolling_sortino=rolling_sortino(simple_full, rate).reindex(window.index),
         **relative_charts,
     )
     sentences = clamp_notes + describe_period(stats)
@@ -1138,8 +1473,9 @@ def _relative_fields(
     window: pd.Series,
     benchmark: pd.DataFrame | None,
     benchmark_ticker: str | None,
+    risk_free: float = DEFAULT_RISK_FREE,
 ) -> tuple[dict, dict]:
-    """Everything that needs the benchmark: the gap, beta, correlation, capture."""
+    """Everything that needs the benchmark: the gap, beta, alpha, correlation, capture."""
     stats = {
         "benchmark_cumulative_return": None,
         "aligned_stock_return": None,
@@ -1155,6 +1491,7 @@ def _relative_fields(
         "down_capture": None,
         "up_days": 0,
         "down_days": 0,
+        "alpha": None,
     }
     charts = {
         "aligned": None,
@@ -1183,6 +1520,7 @@ def _relative_fields(
     if len(pairs) >= MIN_RETURNS_FOR_RATIOS:
         stats["beta"] = _optional(beta, pairs["stock"], pairs["benchmark"])
         stats["correlation"] = _optional(correlation, pairs["stock"], pairs["benchmark"])
+        stats["alpha"] = _optional(jensen_alpha, pairs["stock"], pairs["benchmark"], risk_free)
     if stats["beta"] is not None:
         stats["beta_label"] = beta_label(stats["beta"])
     if stats["correlation"] is not None:
@@ -1212,6 +1550,7 @@ def build_comparison(
     reports: dict[str, PeriodReport],
     benchmark_report: PeriodReport | None = None,
     portfolio_report: PeriodReport | None = None,
+    weights: dict[str, float] | None = None,
 ) -> Comparison:
     """
     Line up the symbols' reports. Each row keeps that symbol's own
@@ -1239,12 +1578,34 @@ def build_comparison(
         symbol_rows = symbol_rows + (portfolio_report.stats,)
     benchmark_stats = None if benchmark_report is None else benchmark_report.stats
     sentences = describe_comparison(symbol_rows, benchmark_stats, rebased)
+
+    # Correlation and diversification use only the selected symbols (not the
+    # synthetic portfolio row or the benchmark), on shared simple returns.
+    symbol_returns = {
+        symbol: report.charts.returns for symbol, report in reports.items()
+    }
+    corr = None
+    divers = None
+    if len(symbol_returns) >= 2:
+        shared_returns = pd.concat(symbol_returns, axis=1, join="inner").dropna(how="any")
+        if len(shared_returns) >= MIN_RETURNS_FOR_RATIOS:
+            corr = _optional(correlation_matrix, shared_returns)
+            if weights:
+                divers = _optional(diversification_stats, shared_returns, weights)
+            else:
+                equal = {symbol: 1.0 for symbol in shared_returns.columns}
+                divers = _optional(diversification_stats, shared_returns, equal)
+            if divers is not None:
+                sentences = sentences + _diversification_sentences(divers)
+
     return Comparison(
         rows=tuple(rows),
         benchmark=benchmark,
         rebased=rebased,
         sentences=sentences,
         portfolio=portfolio_name,
+        correlation_matrix=corr,
+        diversification=divers,
     )
 
 
@@ -1392,7 +1753,9 @@ def describe_period(stats: PeriodStats) -> tuple[str, ...]:
         _average_sentence(stats),
         _benchmark_sentence(stats),
         _beta_sentence(stats),
+        _alpha_sentence(stats),
         _capture_sentence(stats),
+        _var_extras_sentence(stats),
     ]
     return tuple(line for line in lines if line)
 
@@ -1497,12 +1860,82 @@ def _drawdown_sentence(stats: PeriodStats) -> str:
             "Maximum drawdown is 0.0%: the adjusted close never finished below "
             "a prior peak inside this window."
         )
-    return (
+    text = (
         f"Maximum drawdown is {stats.max_drawdown:.1%}, from a peak of "
         f"{stats.drawdown_peak_price:.2f} on {stats.drawdown_peak.date().isoformat()} "
         f"to a trough of {stats.drawdown_trough_price:.2f} on "
         f"{stats.drawdown_trough.date().isoformat()}."
     )
+    if stats.drawdown_days_to_trough is not None:
+        text += f" That decline spanned {stats.drawdown_days_to_trough} trading sessions."
+    if stats.drawdown_recovered:
+        text += (
+            f" Price recovered to the prior peak in "
+            f"{stats.drawdown_days_to_recovery} trading sessions after the trough."
+        )
+    elif stats.drawdown_recovered is False:
+        text += " The window ends before price recovered to that prior peak."
+    if stats.longest_underwater_days is not None:
+        text += (
+            f" The longest stretch below a running peak lasted "
+            f"{stats.longest_underwater_days} trading sessions."
+        )
+    return text
+
+
+def _alpha_sentence(stats: PeriodStats) -> str:
+    if stats.benchmark is None:
+        return ""
+    if stats.alpha is None:
+        return (
+            f"Jensen's alpha versus {stats.benchmark} is omitted: it needs at least "
+            f"{MIN_RETURNS_FOR_RATIOS} shared daily returns that vary, and this window has "
+            f"{stats.return_pairs}."
+        )
+    sign = "above" if stats.alpha > 0 else "below" if stats.alpha < 0 else "in line with"
+    return (
+        f"Annualised Jensen's alpha versus {stats.benchmark} is {stats.alpha:+.1%}: "
+        f"after adjusting for beta, average daily excess return was {sign} the "
+        f"benchmark's, scaled by {TRADING_DAYS} trading days."
+    )
+
+
+def _var_extras_sentence(stats: PeriodStats) -> str:
+    parts: list[str] = []
+    if stats.parametric_var_95 is not None:
+        parts.append(
+            f"95% parametric (Gaussian) VaR is {stats.parametric_var_95:.1%}"
+        )
+    if stats.cvar_95 is not None:
+        parts.append(
+            f"95% Conditional VaR (expected shortfall) is {stats.cvar_95:.1%}, "
+            f"the average loss on days at or below the historical VaR threshold"
+        )
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0] + "."
+    return parts[0] + "; " + parts[1] + "."
+
+
+def _diversification_sentences(stats: DiversificationStats) -> tuple[str, ...]:
+    lines: list[str] = []
+    if stats.diversification_ratio is not None and stats.portfolio_volatility is not None:
+        lines.append(
+            f"The diversification ratio is {stats.diversification_ratio:.2f}: "
+            f"weighted standalone volatility is {stats.weighted_avg_volatility:.1%} a year "
+            f"versus portfolio volatility of {stats.portfolio_volatility:.1%}."
+        )
+    if stats.effective_n is not None:
+        lines.append(
+            f"The effective number of holdings is {stats.effective_n:.2f} "
+            f"(1 / Σ w² over the {len(stats.weights)} weights)."
+        )
+    if stats.risk_contribution:
+        ranked = sorted(stats.risk_contribution.items(), key=lambda item: -item[1])
+        listing = ", ".join(f"{name} {share:.0%}" for name, share in ranked)
+        lines.append(f"Risk contribution by weight: {listing}.")
+    return tuple(lines)
 
 
 def _extreme_sentence(stats: PeriodStats) -> str:
