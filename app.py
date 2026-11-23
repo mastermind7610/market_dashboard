@@ -69,6 +69,7 @@ from features import (
     methodology_notes,
     volatility_rule_text,
 )
+from analyst import LLM_MODE, RULE_BASED_MODE, facts_table_rows
 from plots import PLOTLY_CONFIG
 
 # The option text is also the value a shared link carries (?data=Offline),
@@ -217,6 +218,45 @@ PAGE_CSS = """
         line-height: 1.5;
     }
     .callout strong {color: #1c2430;}
+    .analyst-panel {
+        background: #ffffff;
+        border: 1px solid #e4e8ee;
+        border-radius: 12px;
+        padding: 0.75rem 1rem 0.85rem 1rem;
+        margin: 0.45rem 0 0.9rem 0;
+    }
+    .analyst-panel.interpretation {
+        border-left: 4px solid #7c3aed;
+    }
+    .analyst-panel.facts {
+        border-left: 4px solid #1f4b99;
+    }
+    .analyst-panel .badge {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #5c6b7a;
+        margin-bottom: 0.35rem;
+    }
+    .analyst-panel.interpretation .badge {color: #6d28d9;}
+    .analyst-panel table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.84rem;
+        font-variant-numeric: tabular-nums;
+    }
+    .analyst-panel th, .analyst-panel td {
+        text-align: left;
+        padding: 0.3rem 0.45rem;
+        border-bottom: 1px solid #eef1f5;
+    }
+    .disclaimer {
+        color: #5c6b7a;
+        font-size: 0.84rem;
+        margin-top: 0.55rem;
+    }
     .error-card {
         background: #fff5f5;
         border: 1px solid #f0c4c4;
@@ -664,12 +704,38 @@ def _sidebar() -> dict:
         "Zooming a chart, or pressing a chart's range buttons, changes the view only. "
         "The metrics use the range selected above the briefing."
     )
+    st.sidebar.subheader("AI analyst")
+    enable_llm = st.sidebar.toggle(
+        "Optional LLM interpretation",
+        value=False,
+        key="enable_llm_analyst",
+        help=(
+            "Off by default. When on, the app may call a remote chat API if a key is "
+            "provided. Computed facts stay on screen either way; the rule-based brief "
+            "always runs locally with no API."
+        ),
+    )
+    llm_key = ""
+    if enable_llm:
+        llm_key = st.sidebar.text_input(
+            "LLM API key (optional)",
+            value="",
+            type="password",
+            key="llm_api_key",
+            help=(
+                "Never committed. Leave blank to keep the rule-based brief only. "
+                "OpenAI-compatible chat completions endpoint."
+            ),
+        )
+        st.sidebar.caption("Keys stay in this browser session. They are not written to disk.")
     return {
         "offline": offline,
         "symbols": symbols,
         "benchmark": benchmark,
         "refresh": refresh,
         "offline_notes": notes,
+        "enable_llm_analyst": bool(enable_llm),
+        "llm_api_key": (llm_key or "").strip() or None,
         **settings,
     }
 
@@ -1019,6 +1085,86 @@ def _summary(briefing) -> None:
         st.markdown("Full formulas and limitations: see `docs/METHODOLOGY.md` in the repository.")
 
 
+def _claim_list(claims) -> str:
+    if not claims:
+        return "<p>No narrative claims for this block.</p>"
+    items = "".join(f"<li>{html.escape(claim.text)}</li>" for claim in claims)
+    return f"<ul>{items}</ul>"
+
+
+def _analyst_section(briefing) -> None:
+    """
+    Phase 4 analyst: computed facts first, then a clearly labeled interpretation.
+    Numbers in the narrative must come from the facts pack (see analyst tests).
+    """
+    pack = getattr(briefing, "analyst", None)
+    if pack is None:
+        st.info("Analyst pack was not built for this briefing.")
+        return
+
+    st.subheader("AI analyst")
+    st.caption(
+        "Facts are computed from the same reports as the cards above. "
+        "Interpretation is separate and never invents figures."
+    )
+
+    # --- Deterministic facts (typed structure rendered as a table) ---
+    rows = facts_table_rows(pack.facts)
+    fact_rows = "".join(
+        f"<tr><th scope='row'>{html.escape(label)}</th>"
+        f"<td>{html.escape(display)}</td>"
+        f"<td><code>{html.escape(key)}</code></td></tr>"
+        for key, label, display in rows
+    )
+    st.markdown(
+        '<div class="analyst-panel facts">'
+        '<div class="badge">Computed facts</div>'
+        "<table><thead><tr><th>Metric</th><th>Value</th><th>Id</th></tr></thead>"
+        f"<tbody>{fact_rows}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+    # --- Rule-based interpretation (default, no API) ---
+    rule = pack.rule_based
+    missing_html = ""
+    if rule.missing_notes:
+        notes = "".join(f"<li>{html.escape(note)}</li>" for note in rule.missing_notes)
+        missing_html = f"<p><em>Data gaps</em></p><ul>{notes}</ul>"
+    st.markdown(
+        '<div class="analyst-panel interpretation">'
+        f'<div class="badge">Interpretation · {html.escape(rule.mode)}</div>'
+        f"<p><strong>{html.escape(rule.title)}</strong></p>"
+        f"{_claim_list(rule.claims)}"
+        f"{missing_html}"
+        f'<p class="disclaimer">{html.escape(rule.disclaimer)}</p>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # --- Optional LLM block (off by default) ---
+    llm = pack.llm
+    if llm is None:
+        st.caption(
+            f"Optional LLM interpretation is off. Toggle it under AI analyst in the sidebar "
+            f"(default mode stays {RULE_BASED_MODE})."
+        )
+    elif llm.mode == LLM_MODE:
+        st.markdown(
+            '<div class="analyst-panel interpretation">'
+            f'<div class="badge">Interpretation · {html.escape(llm.mode)} (optional)</div>'
+            f"<p><strong>{html.escape(llm.title)}</strong></p>"
+            f"{_claim_list(llm.claims)}"
+            f'<p class="disclaimer">{html.escape(llm.disclaimer)}</p>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        for note in llm.missing_notes:
+            st.caption(note)
+    else:
+        for note in llm.missing_notes:
+            st.caption(note)
+
+
 def _table(briefing) -> None:
     st.subheader("Side by side")
     table = comparison_table(briefing.comparison)
@@ -1224,6 +1370,8 @@ def _brief(request: dict):
             rebalance=request.get("rebalance") or REBALANCE_NONE,
             portfolio=bool(request.get("portfolio")),
             cost_bps=float(request.get("cost_bps") or DEFAULT_COST_BPS),
+            enable_llm_analyst=bool(request.get("enable_llm_analyst")),
+            llm_api_key=request.get("llm_api_key"),
         )
 
 
@@ -1295,6 +1443,7 @@ def main() -> None:
     if _show_section(section, SECTION_NARRATIVE):
         _calendar_years(briefing)
         _summary(briefing)
+        _analyst_section(briefing)
     request["tab"] = st.session_state.get("tab") or TABS[0]
     request["chart"] = st.session_state.get("chart") or LINE
     request["section"] = st.session_state.get("section") or SECTION_ALL
