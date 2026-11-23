@@ -38,6 +38,8 @@ from data_loader import (
     offline_symbols,
     search_symbols,
 )
+# Metric helpers and portfolio constants live in features.py in this repo
+# (not the unrelated PyPI package of the same name).
 from features import (
     DEFAULT_RISK_FREE,
     MA_LONG,
