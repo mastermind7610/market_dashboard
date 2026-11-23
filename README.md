@@ -78,7 +78,8 @@ The page is laid out top to bottom:
    - **Returns**: the daily return histogram over the benchmark's, and the monthly returns heatmap.
 9. **Calendar-year returns** for the focused symbol, with a short sentence naming the best and worst years in the window.
 10. **What the numbers say**: the sentences for the focus, the portfolio when present, and the comparison, plus the definition of every figure and label.
-11. **Download analysis summary** (Markdown), **Download price/return CSV**, and **Link to this view**.
+11. **AI analyst** (Narrative): a typed **Computed facts** table from the same reports as the cards, then a clearly labeled **rule-based** interpretation that may only quote those facts. Optional LLM interpretation is off by default (sidebar toggle; no keys in the repo). Every brief includes a not-financial-advice note.
+12. **Download analysis summary** (Markdown), **Download price/return CSV**, and **Link to this view**.
 
 ![Candles, volume and resized averages](docs/screenshots/candlestick.png)
 
@@ -285,7 +286,8 @@ Run `python -m unittest discover -s tests -v` for the current count.
 - `tests/test_pipeline.py`: offline/live briefings, cache, outages, CLI, multi-symbol edges.
 - `tests/test_portfolio_and_risk.py`: weights, buy-and-hold and monthly rebalance hand paths (MTM-then-reset), historical VaR, calendar years, snapshots, CSV, search.
 - `tests/test_advanced_quant.py`: drawdown recovery/underwater, parametric VaR, CVaR, Jensen alpha, diversification, cost-aware backtest, rolling Sharpe, look-ahead guards (rebalance-day prior weights; no forward fill).
-- `tests/test_app.py`: Streamlit `AppTest` cards (15 metrics including parametric VaR, CVaR, alpha, recovery days), portfolio mode, CSV, search, share links.
+- `tests/test_analyst.py`: typed AnalystFacts, rule-based claim traceability, not-financial-advice, optional LLM off-by-default and drop of untraceable claims.
+- `tests/test_app.py`: Streamlit `AppTest` cards (15 metrics including parametric VaR, CVaR, alpha, recovery days), portfolio mode, CSV, search, share links, AI analyst panels.
 
 ## Layout
 
@@ -294,11 +296,12 @@ data_loader.py   prices, search, company snapshot, 12-hour cache, bundled files
 features.py      returns, risk, VaR/CVaR, alpha, diversification, portfolio/costs, ratios, sentences
 plots.py         Plotly charts (including correlation heatmap and rolling Sharpe/Sortino)
 dashboard.py     one briefing, command line, Markdown and CSV export
+analyst.py       typed facts + rule-based (default) / optional LLM interpretation
 app.py           the page
 docs/METHODOLOGY.md  formulas, look-ahead rules, assumptions, data quality
 ```
 
-`plots.py` does not read files. `features.py` does not draw. `dashboard.py` is the only place the pieces are assembled. `app.py` only collects inputs and displays that result.
+`plots.py` does not read files. `features.py` does not draw. `dashboard.py` is the only place the pieces are assembled. `analyst.py` only reads computed reports (never CSV or Plotly). `app.py` only collects inputs and displays that result.
 
 ## Known limitations
 

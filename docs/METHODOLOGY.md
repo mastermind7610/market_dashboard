@@ -89,6 +89,10 @@ The correlation heatmap is the Pearson matrix of the same return columns.
 - Costs are proportional to turnover only — no bid–ask, slippage schedule, taxes, or cash drag.
 - Long-only weights. No leverage, shorts, or options.
 
+## AI analyst (optional interpretation)
+
+The Narrative section shows a **Computed facts** table built only from `PeriodReport` / `Comparison` / cost / diversification outputs already on the briefing. A **rule-based** brief fills templates with those display strings; tests fail if any numeric token in a claim is absent from the fact sheet. An optional LLM path (sidebar, off by default, caller-supplied key only — never committed) may add a second interpretation block; untraceable LLM claims are dropped. Every brief includes the not-financial-advice disclaimer. Missing fields produce gap notes rather than invented figures.
+
 ## Limitations and data quality
 
 - Yahoo Finance is best-effort and unauthenticated. Empty answers are not cached; cold starts may retry then fall back to a 12-hour disk cache when present.

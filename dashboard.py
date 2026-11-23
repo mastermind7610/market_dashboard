@@ -68,6 +68,7 @@ from features import (
     volatility_rule_text,
     window_for_preset,
 )
+from analyst import AnalystPack, build_analyst_pack
 from plots import (
     allocation_chart,
     candlestick_chart,
@@ -120,6 +121,7 @@ class Briefing:
     export_csv: str | None = None
     cost_bps: float = DEFAULT_COST_BPS
     cost_report: PortfolioCostReport | None = None
+    analyst: AnalystPack | None = None
 
     @property
     def stock(self) -> PriceHistory:
@@ -159,6 +161,8 @@ def run_briefing(
     rebalance: str = REBALANCE_NONE,
     portfolio: bool = False,
     cost_bps: float = DEFAULT_COST_BPS,
+    enable_llm_analyst: bool = False,
+    llm_api_key: str | None = None,
 ) -> Briefing:
     """
     One briefing. Pass ``tickers`` for several symbols, or ``ticker``
@@ -250,6 +254,15 @@ def run_briefing(
         rebalance=rebalance_mode,
         snapshot=snapshot,
     )
+    # Analyst pack is derived only from computed reports — never from raw prices.
+    analyst = build_analyst_pack(
+        focus_report=reports[chosen],
+        comparison=comparison,
+        portfolio_report=portfolio_report,
+        cost_report=cost_report,
+        enable_llm=enable_llm_analyst,
+        llm_api_key=llm_api_key,
+    )
     return Briefing(
         histories=histories,
         failed=failed,
@@ -269,6 +282,7 @@ def run_briefing(
         export_csv=export_csv,
         cost_bps=cost_bps,
         cost_report=cost_report,
+        analyst=analyst,
     )
 
 
