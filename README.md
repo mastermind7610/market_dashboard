@@ -18,8 +18,13 @@ The numbers in the screenshots and the worked examples below were produced on 22
 | Monthly returns heatmap and a daily return histogram | Portfolio Visualizer's monthly returns table; the histogram shows the tails that a volatility figure averages away |
 | Candlestick and volume view with moving averages you can resize, range buttons and a range slider | TradingView and Yahoo Finance charts |
 | A link that reproduces the view | TradingView and Koyfin saved views; finviz puts the whole screen in the URL |
+| Portfolio mode: weights (default equal), none / monthly / quarterly rebalance, portfolio line and table row versus the benchmark | Portfolio Visualizer's portfolio backtest; weights that do not sum to 100% are scaled and named in a note |
+| Company snapshot for the focused symbol (name, sector, market cap, P/E, dividend yield, 52-week range) | Yahoo Finance quote summary; offline placeholders are labelled as such |
+| Company-name search (e.g. `apple` → AAPL) | Yahoo Finance symbol search |
+| CSV of aligned prices and daily returns, plus a Markdown summary that includes the portfolio | Export of the same figures the page shows |
+| 95% historical VaR and calendar-year returns, with sentences driven by the numbers | Historical VaR as the loss size of the 5th percentile daily return |
 
-Left out on purpose: fundamentals and valuation, screeners, news, technical indicators beyond moving averages, and portfolio weights. They are the main business of the sites above, and none of them answers this page's question, which is how one stock behaved against a benchmark over a window.
+Left out on purpose: screeners, news, technical indicators beyond moving averages, and multi-leg options. This page still answers how selected symbols — and an optional mix of them — behaved against a benchmark over a window.
 
 ## Setup
 
@@ -50,22 +55,28 @@ The page opens on AAPL against SPY for the last year. In the sidebar, add MSFT a
 | NVDA | -30.3% | -30.4% | 41.6% | -47.5% | -0.67 | -0.89 | 1.28 | 0.69 | 116% | 144% | -34.7 | 252 |
 | QQQ (benchmark) | +4.4% | +4.4% | 22.4% | -19.9% | 0.30 | 0.41 | — | — | — | — | — | 252 |
 
-**In focus** chooses which symbol the ten cards, the single-symbol charts and the sentences describe. The table and the comparison chart always show all of them.
+**In focus** chooses which symbol the ten cards, the single-symbol charts, the company snapshot and the sentences describe. The table and the comparison chart always show all of them.
+
+Turn on **Portfolio mode** in the sidebar when two or more symbols are selected. Weights default to equal; monthly or quarterly rebalance is optional. The portfolio appears as its own green line on Compare and as a green-shaded row in the table.
+
+On 22 Nov 2026, a live equal-weight AAPL+MSFT portfolio against SPY for the last year returned about **+15.6%** while SPY returned **+6.9%**. Offline Max with monthly rebalance (bundled files) returned **+28.1%** versus SPY **+21.4%**, with 95% historical VaR about **2.0%**.
 
 The page is laid out top to bottom:
 
 1. **Date range**: 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y, Max, or **Custom** with a start and an end date.
 2. **Status**: the source, the latest bar and the fetch time for every symbol.
-3. **Cards**: cumulative return, annualized return, volatility, maximum drawdown, gap to the benchmark, Sharpe, Sortino, beta, correlation, volatility label. Each has a definition under its question mark.
-4. **Side by side**: the table above.
-5. **Charts**, in five tabs:
-   - **Compare**: every symbol rebased to 100 on the first session they all share. The benchmark is dashed.
+3. **Company snapshot**: name, sector, market cap, P/E, dividend yield and 52-week range for the focused symbol. Missing fields are named; offline placeholders say so.
+4. **Cards**: cumulative return, annualized return, volatility, maximum drawdown, gap to the benchmark, Sharpe, Sortino, beta, correlation, 95% historical VaR. The volatility label sits under the cards.
+5. **Side by side**: the table above. The portfolio row is green when Portfolio mode is on.
+6. **Charts**, in five tabs:
+   - **Compare**: every symbol rebased to 100 on the first session they all share. The benchmark is dashed; the portfolio is solid green.
    - **Price**: adjusted close with two moving averages, as a line or as candles with volume.
    - **Drawdown**: the stock's and the benchmark's decline from their running peaks.
    - **Risk**: rolling 21-day volatility, and rolling 63-day beta and correlation.
    - **Returns**: the daily return histogram over the benchmark's, and the monthly returns heatmap.
-6. **What the numbers say**: the sentences, and the definition of every figure and label.
-7. **Download analysis summary** (Markdown) and **Link to this view**.
+7. **Calendar-year returns** for the focused symbol, with a short sentence naming the best and worst years in the window.
+8. **What the numbers say**: the sentences for the focus, the portfolio when present, and the comparison, plus the definition of every figure and label.
+9. **Download analysis summary** (Markdown), **Download price/return CSV**, and **Link to this view**.
 
 ![Candles, volume and resized averages](docs/screenshots/candlestick.png)
 
@@ -75,7 +86,7 @@ The page is laid out top to bottom:
 
 ![The sentences for the symbol in focus and across the symbols](docs/screenshots/explanation.png)
 
-**Chart and risk settings** in the sidebar holds the two moving-average windows (2 to 400 days, the short one shorter than the long one) and the annual risk-free rate used by Sharpe and Sortino (0% to 20%, default 0%).
+**Chart and risk settings** in the sidebar holds the two moving-average windows (2 to 400 days, the short one shorter than the long one) and the annual risk-free rate used by Sharpe and Sortino (0% to 20%, default 0%). Below that, **Portfolio mode** turns on weights and rebalance. In live mode, **Find a company or fund** searches Yahoo by name (typing `apple` suggests AAPL).
 
 ### A custom range
 
@@ -105,6 +116,9 @@ Every control writes itself into the address bar, so the address is the view. A 
 | `tab` | `Compare` `Price` `Drawdown` `Risk` `Returns` | `Compare` |
 | `chart` | `Line` or `Candlestick` on the Price tab | `Line` |
 | `data` | `Live` or `Offline` | `Live` |
+| `portfolio` | `True` to turn Portfolio mode on | off |
+| `rebalance` | `none` `monthly` `quarterly` | `none` |
+| `w_AAPL`, `w_MSFT`, … | Weight percent for each selected symbol | equal weight when portfolio is on |
 
 The custom-range example above is `?symbols=JPM&symbols=XOM&benchmark=DIA&range=Custom&start=2024-01-02&end=2025-06-30`. A value the page cannot use, such as a symbol the offline demo does not have, is dropped and the default is used.
 
@@ -152,7 +166,7 @@ Per unit of volatility, AAPL ranks first with a Sharpe ratio of 1.15 and NVDA la
 Saved summary to analysis.md
 ```
 
-Flags: `--ticker` or `--tickers` (up to five), `--benchmark`, `--focus`, `--preset` (`1M` `3M` `6M` `YTD` `1Y` `3Y` `5Y` `Max`) or both `--start` and `--end` as `YYYY-MM-DD`, `--ma-short`, `--ma-long`, `--risk-free` (percent a year), `--offline`, `--refresh`, `--output`.
+Flags: `--ticker` or `--tickers` (up to five), `--benchmark`, `--focus`, `--preset` (`1M` `3M` `6M` `YTD` `1Y` `3Y` `5Y` `Max`) or both `--start` and `--end` as `YYYY-MM-DD`, `--ma-short`, `--ma-long`, `--risk-free` (percent a year), `--portfolio`, `--weight SYMBOL=PERCENT` (repeatable), `--rebalance` (`none` `monthly` `quarterly`), `--csv` (aligned price/return file), `--offline`, `--refresh`, `--output`.
 
 ### Offline demo
 
@@ -177,9 +191,26 @@ python dashboard.py --offline --tickers AAPL MSFT --benchmark QQQ --preset Max
 | MSFT | +66.2% | +28.2% | 23.8% | -16.6% | 1.16 | 1.86 | 1.12 | 0.77 | 114% | 100% | +36.2 | 517 |
 | QQQ (benchmark) | +30.0% | +13.7% | 16.5% | -16.1% | 0.86 | 1.21 | — | — | — | — | — | 517 |
 
+Equal-weight AAPL+MSFT against SPY, Max, monthly rebalance (offline):
+
+| Symbol | Return | Annualized return | Volatility | Max drawdown | Sharpe | Vs benchmark (pp) | Sessions |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| AAPL | +10.1% | +4.9% | 24.3% | -30.4% | 0.32 | -6.3 | 506 |
+| MSFT | +66.2% | +28.2% | 23.8% | -16.6% | 1.16 | +44.8 | 517 |
+| Portfolio | +28.1% | +13.2% | 20.3% | -19.4% | 0.71 | +11.6 | 506 |
+| SPY (benchmark) | +21.4% | +10.0% | 13.8% | -13.0% | 0.76 | — | 517 |
+
+AAPL's 95% historical VaR on that window is about 2.5%; the portfolio's is about 2.0%. Calendar-year returns for AAPL in the sample: 2015 −16.6%, 2016 +12.4%, 2017 +17.0%. The company snapshot shows Apple Inc., Technology, with fields labelled as an offline placeholder.
+
 AAPL's file starts ten sessions after the others and ends one session earlier. Its row covers its own 506 sessions, its gap of −13.2 points is measured on the sessions it shares with QQQ (QQQ returned +23.4% on those), and the page says so in a sentence.
 
 ![Offline demo, AAPL and MSFT against QQQ](docs/screenshots/offline_demo.png)
+
+![Offline portfolio mode with company snapshot and 95% VaR](docs/screenshots/portfolio_overview.png)
+
+![Portfolio row and green portfolio line on Compare](docs/screenshots/portfolio_compare.png)
+
+![Company-name search: apple suggests AAPL](docs/screenshots/company_search.png)
 
 ## How the figures are defined
 
@@ -194,6 +225,14 @@ All figures use the adjusted close. The same text is on the page under **How eve
 - **Best day, worst day** are the largest and smallest daily simple returns in the window. The share of gains is the fraction of daily returns above zero.
 - **Moving averages** are simple averages of adjusted close, 50 and 200 days unless changed. They are computed on the full loaded history and then drawn on the selected dates, so a 200-day average can appear inside a shorter window.
 - **Monthly returns** chain inside the window: each month's last adjusted close over the previous month's last, with the window's first close as the base of the first month. The first and last months can be partial. Compounded, the cells equal the cumulative return.
+- **95% historical Value at Risk** is minus the 5th percentile of daily simple returns inside the window, reported as a positive loss fraction. At least 20 daily returns. A VaR of 2% means that on 95% of days the return was better than −2%.
+- **Calendar-year returns** take the first and last adjusted close inside each calendar year of the window. Partial years are allowed. A year with only one print is skipped.
+
+**Portfolio**
+
+- **Weights** are fractions of the portfolio. Missing weights default to equal weight. Zero-weight symbols are dropped. Negative weights are rejected. Weights that do not sum to 100% are scaled to 100% and named in a note.
+- **Buy and hold** (`none`) keeps the opening share counts after day one. **Monthly** or **quarterly** rebalance resets to the target weights on the first shared session of each new month or quarter.
+- The portfolio is treated like a symbol for return, risk, drawdown, VaR, beta and the comparison chart. It needs at least two loaded symbols.
 
 **Return per unit of risk**
 
@@ -229,20 +268,21 @@ Live OHLC from Yahoo is fetched with `auto_adjust=True`, so every symbol is adju
 python -m unittest discover -s tests -v
 ```
 
-104 tests.
+137 tests.
 
 - `tests/test_calculations.py` (11): hand-computed returns, the annualized-volatility formula, a known peak-to-trough drawdown (−25% from 120 to 90), moving-average warmup, date alignment without filling gaps, and a jumpy window labelled elevated against a calm history.
 - `tests/test_metrics.py` (45): known answers for annualized return, the daily risk-free rate, Sharpe, downside deviation, Sortino, beta, correlation, up and down capture, best and worst day, rolling beta and correlation, monthly returns and their table, adjusted candles, rebasing and shared sessions, each label cut, and the settings limits. Edge cases: a part-year window, too few returns, a flat series, no losing days, a benchmark that never moved, too few up or down days, windows in the wrong order. One case builds a stock that moves exactly twice the benchmark each day and checks beta 2, correlation 1 and capture 200% through the whole pipeline.
 - `tests/test_pipeline.py` (28): the four bundled files, offline briefings, several symbols against a chosen benchmark, one bad symbol among several, every symbol bad, the benchmark listed as a symbol, more than five symbols, a symbol with no sessions in the range, settings passed through and rejected, the disk cache, an outage served from an expired download and an outage with nothing on disk, download retries that never cache an empty frame, offline selection notices, the command line, and live Yahoo fetches (skipped if Yahoo is unreachable).
-- `tests/test_app.py` (20): the page itself, driven headless with Streamlit's `AppTest`. The cards match the calculation, a link reproduces a multi-symbol view and the page writes the same link back, a custom range, a one-day range, changing the range, the focus and the benchmark, averages in the wrong order, offline drop notices for missing symbols and benchmarks, an empty symbol list, In focus listing only symbols that loaded, switching Live→Offline naming dropped tickers, and live mode with the download stubbed: one unknown ticker, only unknown tickers, an outage, a missing benchmark.
+- `tests/test_portfolio_and_risk.py` (31): weight normalization (equal weight, sums ≠ 100%, zeros, negatives), buy-and-hold and monthly rebalance hand paths, historical VaR percentile and edges, calendar-year returns, offline and sparse company snapshots (including dividend-yield percent scaling), CSV export, offline portfolio briefing, and `apple` → AAPL search.
+- `tests/test_app.py` (22): the page itself, driven headless with Streamlit's `AppTest`. The cards match the calculation (including 95% VaR), a link reproduces a multi-symbol view, portfolio mode with snapshot, calendar years, CSV download and a green portfolio row, company-name search wiring, a custom range, a one-day range, changing the range, the focus and the benchmark, averages in the wrong order, offline drop notices, an empty symbol list, In focus listing only symbols that loaded, switching Live→Offline naming dropped tickers, and live mode with the download stubbed.
 
 ## Layout
 
 ```
-data_loader.py   prices, search, 12-hour cache, bundled files
-features.py      returns, risk, ratios, benchmark relationship, comparison, sentences
+data_loader.py   prices, search, company snapshot, 12-hour cache, bundled files
+features.py      returns, risk, VaR, calendar years, portfolio, ratios, comparison, sentences
 plots.py         Plotly charts
-dashboard.py     one briefing, command line, Markdown summary
+dashboard.py     one briefing, command line, Markdown and CSV export
 app.py           the page
 ```
 
@@ -257,11 +297,16 @@ app.py           the page
 - The volatility label is a rank inside one symbol's own history. A 25% year can be "typical" when older decades were wilder. Read the percentile next to the word.
 - The table gives each symbol its own sessions. A symbol that listed part-way through the range has a shorter row, and its return is not comparable with the others until the range is narrowed to dates they share. The page names the symbol and the date.
 - Rolling beta and correlation need 63 shared daily returns of history before the first point.
-- Five symbols at most, equal standing. No portfolio weights, no trades, no options, no fundamentals.
+- Five symbols at most. Portfolio mode mixes those that loaded; it is not a trade blotter and does not model costs, taxes or cash.
+- Company facts come from yfinance `info`. Fields Yahoo leaves blank stay blank. Offline snapshots are illustrative placeholders labelled as such, not restated fundamentals for 2015–2017.
+- Historical VaR uses daily simple returns and a single left-tail percentile. It is not parametric VaR and not a forward-looking risk limit.
 - Offline AAPL is the 2017-vintage plotly file. The other three offline files were saved from Yahoo on 22 Nov 2026, so AAPL was not adjusted on the same day as its benchmark. The offline sample ends in Feb 2017.
 - With `range=Custom` left on the dates the page proposes, the address bar omits `start` and `end`, so that address would move with the calendar. **Link to this view** always writes the two dates out, so use that box for a custom range.
 - The cache is a local `.cache/` directory, ignored by git, reused for 12 hours.
 - Symbol search returns equities and ETFs. A blank or a symbol with spaces or punctuation is rejected before any download.
+- Portfolio rebalance query params bind after Portfolio mode is on; a shared link that only sets `rebalance` without `portfolio=True` leaves rebalance at none until the checkbox is enabled.
+- Narrow screens tighten padding and metric type; the comparison table scrolls horizontally below 900px. Streamlit's own sidebar drawer still owns the phone layout.
+- This round does not change Streamlit Community Cloud hosting settings; redeploy the branch you choose after merge.
 
 ## Publish on Streamlit Community Cloud
 
@@ -269,7 +314,7 @@ No secret is required. The deployed app does need outbound HTTPS to Yahoo Financ
 
 1. Open [share.streamlit.io](https://share.streamlit.io) and sign in with the GitHub account that owns `mastermind7610/market_dashboard`.
 2. Choose **Create app**, then **Yup, I have an app**.
-3. Repository `mastermind7610/market_dashboard`, branch `main` after this pull request is merged (or branch `cursor/risk-regime-demo-5ee9` to preview the draft), main file path `app.py`.
+3. Repository `mastermind7610/market_dashboard`, branch `main` after this pull request is merged (or branch `cursor/portfolio-and-fundamentals-5ee9` to preview), main file path `app.py`.
 4. Under **Advanced settings**, select **Python 3.12**. Leave secrets empty.
 5. Deploy. Community Cloud installs `requirements.txt` and runs `streamlit run app.py`.
 

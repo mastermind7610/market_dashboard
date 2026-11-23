@@ -45,7 +45,12 @@ from features import (
     MAX_MA_WINDOW,
     MIN_MA_WINDOW,
     MISSING,
+    PORTFOLIO_LABEL,
     PRESETS,
+    REBALANCE_MONTHLY,
+    REBALANCE_NONE,
+    REBALANCE_OPTIONS,
+    REBALANCE_QUARTERLY,
     RISK_FREE_MAX,
     RISK_FREE_MIN,
     ROLLING_BETA_WINDOW,
@@ -53,6 +58,7 @@ from features import (
     TABLE_FORMATS,
     AnalysisError,
     comparison_table,
+    describe_calendar_years,
     format_cell,
     metric_help,
     methodology_notes,
@@ -155,7 +161,41 @@ PAGE_CSS = """
     table.compare th:first-child {text-align: left;}
     table.compare tbody tr:last-child th, table.compare tbody tr:last-child td {border-bottom: none;}
     table.compare tr.focus th, table.compare tr.focus td {background: #eef4ff;}
+    table.compare tr.portfolio th, table.compare tr.portfolio td {background: #f4fbf6; font-weight: 600;}
+    .snapshot-card {
+        background: #ffffff;
+        border: 1px solid #e4e8ee;
+        border-radius: 12px;
+        padding: 0.75rem 1rem;
+        margin: 0.35rem 0 0.9rem 0;
+        color: #3c4756;
+        font-size: 0.92rem;
+        line-height: 1.55;
+    }
+    .snapshot-card .snap-title {font-weight: 650; color: #1c2430; margin-bottom: 0.2rem;}
+    .snapshot-card .muted {color: #5c6b7a; font-size: 0.84rem;}
+    .year-table {width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;}
+    .year-table th, .year-table td {padding: 0.35rem 0.55rem; border-bottom: 1px solid #eef1f5; text-align: right;}
+    .year-table th:first-child, .year-table td:first-child {text-align: left;}
     div[data-testid="stTabs"] {margin-top: 0.4rem;}
+    @media (max-width: 900px) {
+        .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: TOP_PADDING;}
+        h1 {font-size: 1.55rem; line-height: 1.2;}
+        div[data-testid="stMetric"] {padding: 0.55rem 0.65rem 0.4rem 0.65rem;}
+        div[data-testid="stMetricValue"] {font-size: 1.05rem !important;}
+        div[data-testid="stMetricLabel"] {font-size: 0.75rem !important;}
+        table.compare {font-size: 0.78rem;}
+        table.compare th, table.compare td {padding: 0.4rem 0.45rem;}
+        .summary-card {padding: 0.2rem 0.7rem 0.45rem 0.7rem;}
+        .status-card {font-size: 0.84rem;}
+        section[data-testid="stSidebar"] {width: min(100vw, 22rem);}
+    }
+    @media (max-width: 640px) {
+        .block-container {padding-left: 0.7rem; padding-right: 0.7rem;}
+        h1 {font-size: 1.35rem;}
+        .kicker {font-size: 0.7rem; letter-spacing: 0.1em;}
+        div[data-testid="stHorizontalBlock"] {gap: 0.45rem;}
+    }
 </style>
 """.replace("TOP_PADDING", f"{TOP_PADDING_REM}rem")
 
@@ -409,7 +449,7 @@ def _symbol_search() -> None:
         st.sidebar.warning(error)
 
 
-def _settings() -> dict:
+def _settings(symbols: list[str]) -> dict:
     with st.sidebar.expander("Chart and risk settings"):
         short = st.number_input(
             "Short moving average (days)",
@@ -440,7 +480,59 @@ def _settings() -> dict:
             bind=BOUND,
             help="Used by the Sharpe and Sortino ratios. Zero is the default so the assumption is visible, not guessed.",
         )
-    return {"ma_short": int(short), "ma_long": int(long), "risk_free": float(rate) / PERCENT}
+    portfolio = _portfolio_controls(symbols)
+    return {
+        "ma_short": int(short),
+        "ma_long": int(long),
+        "risk_free": float(rate) / PERCENT,
+        **portfolio,
+    }
+
+
+def _portfolio_controls(symbols: list[str]) -> dict:
+    """Weights and rebalance. Equal weight is the default when portfolio mode is on."""
+    usable = [symbol for symbol in symbols if symbol]
+    enabled = st.sidebar.checkbox(
+        "Portfolio mode",
+        value=False,
+        key="portfolio",
+        bind=BOUND,
+        help="Mix the selected symbols into one portfolio line and table row versus the benchmark.",
+    )
+    if not enabled or len(usable) < 2:
+        if enabled and len(usable) < 2:
+            st.sidebar.caption("Add at least two symbols to build a portfolio.")
+        return {"portfolio": False, "weights": None, "rebalance": REBALANCE_NONE}
+
+    labels = {
+        REBALANCE_NONE: "None (buy and hold)",
+        REBALANCE_MONTHLY: "Monthly",
+        REBALANCE_QUARTERLY: "Quarterly",
+    }
+    rebalance = st.sidebar.selectbox(
+        "Rebalance",
+        REBALANCE_OPTIONS,
+        index=0,
+        format_func=lambda key: labels[key],
+        key="rebalance",
+        bind=BOUND,
+        help="Monthly or quarterly resets the mix to the target weights on the first shared session of each period.",
+    )
+    equal = 100.0 / len(usable)
+    st.sidebar.caption(f"Weights as percent of the portfolio. Equal weight is {equal:.1f}% each.")
+    weights: dict[str, float] = {}
+    for symbol in usable:
+        percent = st.sidebar.number_input(
+            f"{symbol} weight (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(round(equal, 2)),
+            step=1.0,
+            key=f"w_{symbol}",
+            help="Zero leaves this symbol out of the mix. Weights are scaled to 100% if they do not already sum to it.",
+        )
+        weights[symbol] = float(percent) / PERCENT
+    return {"portfolio": True, "weights": weights, "rebalance": rebalance}
 
 
 def _sidebar() -> dict:
@@ -459,7 +551,7 @@ def _sidebar() -> dict:
         st.session_state.pop("offline_intent_captured", None)
     if not offline:
         _symbol_search()
-    settings = _settings()
+    settings = _settings(symbols)
     refresh = False
     if not offline:
         refresh = st.sidebar.button("Refresh prices")
@@ -625,7 +717,8 @@ def _metrics(stats) -> None:
     bottom[1].metric("Sortino ratio", _number(stats.sortino, "{:.2f}"), help=help_text["sortino"])
     bottom[2].metric(f"Beta vs {bench}", _number(stats.beta, "{:.2f}"), help=help_text["beta"])
     bottom[3].metric(f"Correlation vs {bench}", _number(stats.correlation, "{:.2f}"), help=help_text["correlation"])
-    bottom[4].metric("Volatility label", label, help=volatility_rule_text())
+    bottom[4].metric("95% hist. VaR", _number(stats.value_at_risk_95, "{:.1%}"), help=help_text["value_at_risk_95"])
+    st.caption(f"Volatility label: **{label}**. {volatility_rule_text()}")
 
 
 def _card(sentences) -> None:
@@ -633,10 +726,85 @@ def _card(sentences) -> None:
     st.markdown(f'<div class="summary-card">{blocks}</div>', unsafe_allow_html=True)
 
 
+def _snapshot(briefing) -> None:
+    snap = briefing.snapshot
+    if snap is None:
+        return
+    st.subheader(f"Company snapshot · {briefing.focus}")
+    title = snap.name or snap.ticker
+    bits = []
+    if snap.sector:
+        bits.append(html.escape(snap.sector))
+    if snap.industry:
+        bits.append(html.escape(snap.industry))
+    facts = []
+    if snap.market_cap is not None:
+        facts.append(f"<strong>Market cap</strong> {_fmt_cap_html(snap.market_cap)}")
+    if snap.pe_ratio is not None:
+        facts.append(f"<strong>P/E</strong> {snap.pe_ratio:.1f}")
+    if snap.dividend_yield is not None:
+        facts.append(f"<strong>Dividend yield</strong> {snap.dividend_yield:.2%}")
+    if snap.fifty_two_week_low is not None and snap.fifty_two_week_high is not None:
+        facts.append(
+            f"<strong>52-week range</strong> {snap.fifty_two_week_low:.2f} – {snap.fifty_two_week_high:.2f}"
+        )
+    missing = []
+    if snap.market_cap is None:
+        missing.append("market cap")
+    if snap.pe_ratio is None:
+        missing.append("P/E")
+    if snap.dividend_yield is None:
+        missing.append("dividend yield")
+    body = " · ".join(facts) if facts else "No valuation fields were available for this symbol."
+    meta = " · ".join(bits)
+    note = html.escape(snap.source)
+    if missing:
+        note += f" · Missing: {', '.join(missing)}"
+    st.markdown(
+        f'<div class="snapshot-card"><div class="snap-title">{html.escape(title)}</div>'
+        f'<div>{meta}</div><div>{body}</div>'
+        f'<div class="muted">{note}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _fmt_cap_html(value: float) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1e12:
+        return f"{value / 1e12:.2f}T"
+    if abs_value >= 1e9:
+        return f"{value / 1e9:.2f}B"
+    if abs_value >= 1e6:
+        return f"{value / 1e6:.2f}M"
+    return f"{value:,.0f}"
+
+
+def _calendar_years(briefing) -> None:
+    years = briefing.report.charts.calendar_years
+    if years is None or len(years) == 0:
+        return
+    st.subheader(f"Calendar-year returns · {briefing.focus}")
+    rows = "".join(
+        f"<tr><th scope='row'>{int(year)}</th><td>{value:+.1%}</td></tr>"
+        for year, value in years.items()
+    )
+    st.markdown(
+        f'<div class="compare-wrap"><table class="year-table">'
+        f"<thead><tr><th>Year</th><th>Return</th></tr></thead><tbody>{rows}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+    sentence = describe_calendar_years(years, ticker=briefing.focus)
+    if sentence:
+        st.caption(sentence)
+
+
 def _summary(briefing) -> None:
     stats = briefing.report.stats
     st.subheader(f"What the numbers say about {briefing.focus}")
     _card(briefing.report.sentences)
+    if briefing.portfolio_report is not None:
+        st.subheader("What the numbers say about the portfolio")
+        _card(briefing.portfolio_report.sentences)
     if briefing.comparison.sentences:
         st.subheader("Across the symbols")
         _card(briefing.comparison.sentences)
@@ -651,7 +819,8 @@ def _table(briefing) -> None:
     st.markdown(_table_html(table, focus=briefing.focus), unsafe_allow_html=True)
     st.caption(
         "Each row uses that symbol's own sessions inside the selected range. Beta, correlation, capture "
-        "and the gap are measured against the benchmark on shared sessions. The shaded row is the symbol in focus."
+        "and the gap are measured against the benchmark on shared sessions. The blue shaded row is the "
+        "symbol in focus; the green shaded row is the portfolio when Portfolio mode is on."
     )
 
 
@@ -664,9 +833,15 @@ def _table_html(table, *, focus: str) -> str:
     head = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
     body = []
     for symbol, row in table.iterrows():
-        css = "focus" if symbol == focus else ""
+        name = str(symbol)
+        if name == focus:
+            css = "focus"
+        elif name == PORTFOLIO_LABEL:
+            css = "portfolio"
+        else:
+            css = ""
         cells = "".join(f"<td>{html.escape(format_cell(column, row[column]))}</td>" for column in columns)
-        body.append(f'<tr class="{css}"><th scope="row">{html.escape(str(symbol))}</th>{cells}</tr>')
+        body.append(f'<tr class="{css}"><th scope="row">{html.escape(name)}</th>{cells}</tr>')
     return (
         '<div class="compare-wrap"><table class="compare">'
         f"<thead><tr><th>Symbol</th>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
@@ -699,6 +874,10 @@ def _share_query(request: dict) -> str:
         pairs.append(("tab", request["tab"]))
     if request.get("chart", LINE) != LINE:
         pairs.append(("chart", request["chart"]))
+    if request.get("portfolio"):
+        pairs.append(("portfolio", "True"))
+        if request.get("rebalance") and request["rebalance"] != REBALANCE_NONE:
+            pairs.append(("rebalance", request["rebalance"]))
     return urlencode(pairs)
 
 
@@ -712,7 +891,7 @@ def _share_link(request: dict) -> str:
 
 
 def _take_away(briefing, request: dict) -> None:
-    left, right = st.columns((1, 3))
+    left, mid, right = st.columns((1, 1, 2))
     with left:
         st.download_button(
             "Download analysis summary",
@@ -720,6 +899,15 @@ def _take_away(briefing, request: dict) -> None:
             file_name=f"{'_'.join(briefing.reports).lower()}_briefing.md",
             mime="text/markdown",
         )
+    with mid:
+        if briefing.export_csv:
+            st.download_button(
+                "Download price/return CSV",
+                data=briefing.export_csv,
+                file_name=f"{'_'.join(briefing.reports).lower()}_prices.csv",
+                mime="text/csv",
+                help="Aligned adjusted closes and daily returns for every symbol, the portfolio when present, and the benchmark.",
+            )
     with right:
         with st.expander("Link to this view"):
             st.code(_share_link(request), language=None)
@@ -728,6 +916,7 @@ def _take_away(briefing, request: dict) -> None:
                 "settings and the open chart tab. Opening the link loads the same view with the prices "
                 "available at that time."
             )
+
 
 
 def _show(figure, missing: str) -> None:
@@ -745,7 +934,8 @@ def _charts(briefing) -> None:
         _show(figures["comparison"], "The comparison chart needs two sessions that every symbol shares.")
         st.caption(
             "Every line starts at 100 on the first session all of them share, so the height of a line is "
-            "its growth since that day. The benchmark is dashed. The symbol in focus is the thicker line."
+            "its growth since that day. The benchmark is dashed. The portfolio, when on, is the solid green "
+            "line. The symbol in focus is the thicker line among the individual symbols."
         )
     with price_tab:
         style = st.segmented_control(
@@ -816,6 +1006,9 @@ def _brief(request: dict):
             ma_short=request["ma_short"],
             ma_long=request["ma_long"],
             risk_free=request["risk_free"],
+            weights=request.get("weights"),
+            rebalance=request.get("rebalance") or REBALANCE_NONE,
+            portfolio=bool(request.get("portfolio")),
         )
 
 
@@ -871,9 +1064,11 @@ def main() -> None:
     headline.title(_title(loaded, request["benchmark"]))
     _warnings(briefing, offline_notes=offline_notes)
     _status(briefing)
+    _snapshot(briefing)
     _metrics(briefing.report.stats)
     _table(briefing)
     _charts(briefing)
+    _calendar_years(briefing)
     _summary(briefing)
     request["tab"] = st.session_state.get("tab") or TABS[0]
     request["chart"] = st.session_state.get("chart") or LINE

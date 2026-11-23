@@ -70,7 +70,7 @@ class OfflinePageTests(unittest.TestCase):
         self.assertEqual(cards["Sortino ratio"], f"{stats.sortino:.2f}")
         self.assertEqual(cards["Beta vs SPY"], f"{stats.beta:.2f}")
         self.assertEqual(cards["Correlation vs SPY"], f"{stats.correlation:.2f}")
-        self.assertEqual(cards["Volatility label"], stats.vol_label.capitalize())
+        self.assertEqual(cards["95% hist. VaR"], f"{stats.value_at_risk_95:.1%}")
         # The numbers the owner checked on the hosted app in the last round.
         self.assertEqual(cards["Cumulative return"], "+10.1%")
         self.assertEqual(cards["Maximum drawdown"], "-30.4%")
@@ -219,6 +219,73 @@ class OfflinePageTests(unittest.TestCase):
         match = re.search(r"\.block-container \{padding-top: ([0-9.]+)rem;", css)
         self.assertIsNotNone(match)
         self.assertGreater(float(match.group(1)), CLOUD_HEADER_REM)
+
+    def test_portfolio_mode_adds_a_row_snapshot_years_and_csv(self) -> None:
+        # Portfolio controls are created only after the checkbox is on, so the
+        # rebalance query param cannot bind on the first run. Turn the mode on
+        # from the link, then set monthly rebalance on the widget.
+        page = _page(
+            data="Offline",
+            symbols=["AAPL", "MSFT"],
+            benchmark="SPY",
+            range="Max",
+            portfolio="True",
+        )
+        self.assertEqual(list(page.exception), [])
+        self.assertEqual(list(page.error), [])
+        self.assertTrue(page.sidebar.checkbox(key="portfolio").value)
+        page.sidebar.selectbox(key="rebalance").set_value("monthly").run()
+        self.assertEqual(list(page.exception), [])
+        self.assertEqual(page.sidebar.selectbox(key="rebalance").value, "monthly")
+        headings = [heading.value for heading in page.subheader]
+        self.assertIn("Company snapshot · AAPL", headings)
+        self.assertIn("Calendar-year returns · AAPL", headings)
+        self.assertIn("What the numbers say about the portfolio", headings)
+        snap = _html(page, "snapshot-card")
+        self.assertIn("Apple Inc.", snap)
+        self.assertIn("Offline demo placeholder", snap)
+        table = _html(page, "compare-wrap")
+        self.assertIn('<tr class="portfolio"><th scope="row">Portfolio</th>', table)
+        self.assertIn("SPY (benchmark)", table)
+        # Two download buttons: markdown summary and CSV of aligned prices.
+        labels = [button.label for button in page.download_button]
+        self.assertIn("Download analysis summary", labels)
+        self.assertIn("Download price/return CSV", labels)
+        cards = _cards(page)
+        self.assertIn("95% hist. VaR", cards)
+        self.assertNotEqual(cards["95% hist. VaR"], "—")
+        css = _html(page, "<style>")
+        self.assertIn("@media (max-width: 900px)", css)
+        self.assertIn("@media (max-width: 640px)", css)
+        link = page.code[0].value
+        self.assertIn("portfolio=True", link)
+        self.assertIn("rebalance=monthly", link)
+
+    def test_company_search_finds_apple_and_the_sidebar_exposes_the_finder(self) -> None:
+        from data_loader import MarketDataError, search_symbols
+
+        try:
+            hits = search_symbols("apple")
+        except MarketDataError as exc:
+            self.skipTest(f"Yahoo Finance unreachable: {exc}")
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].symbol, "AAPL")
+        self.assertIn("Apple", hits[0].name)
+        # Live mode shows the company finder; offline mode does not.
+        with patch("data_loader._download_yahoo") as download:
+            frame = load_prices()
+
+            def fake(ticker: str):
+                out = frame.copy()
+                out.attrs["ticker"] = ticker
+                return out
+
+            download.side_effect = fake
+            live = _page()
+        self.assertEqual(list(live.exception), [])
+        self.assertTrue(any(input.label == "Find a company or fund" for input in live.sidebar.text_input))
+        offline = _page(data="Offline")
+        self.assertFalse(any(input.label == "Find a company or fund" for input in offline.sidebar.text_input))
 
 
 class LivePageWithStubbedYahooTests(unittest.TestCase):

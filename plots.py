@@ -22,6 +22,10 @@ COLOR_VOL = "#1f4b99"
 COLOR_UP = "#15803d"
 COLOR_DOWN = "#b91c1c"
 COLOR_REFERENCE = "#94a3b8"
+# Matches features.PORTFOLIO_LABEL. Kept as a string here so plots stays
+# free of the feature layer; only the chart colour cares about the name.
+PORTFOLIO_SERIES = "Portfolio"
+COLOR_PORTFOLIO = "#15803d"
 # One colour per compared symbol, in selection order. The benchmark is
 # always the dashed slate line, so a symbol never shares its colour.
 SERIES_COLORS = ("#1f4b99", "#d97706", "#7c3aed", "#be123c", "#0891b2")
@@ -196,16 +200,23 @@ def comparison_chart(
     """
     One line per column of ``rebased``, which the feature layer has
     already set to 100 on the first shared session. The benchmark is
-    dashed. The symbol in focus is drawn thicker.
+    dashed. The portfolio mix is a solid green line. The symbol in
+    focus is drawn thicker.
     """
     if rebased is None or len(rebased) < 2:
         return None
     symbols = [column for column in rebased.columns if column != benchmark]
     names = ", ".join(symbols) + (f" and {benchmark}" if benchmark in rebased.columns else "")
     figure = _figure(f"{names}, rebased to 100")
-    for position, symbol in enumerate(symbols):
-        color = SERIES_COLORS[position % len(SERIES_COLORS)]
-        width = FOCUS_LINE_WIDTH if symbol == focus else LINE_WIDTH
+    colour_index = 0
+    for symbol in symbols:
+        if symbol == PORTFOLIO_SERIES:
+            color = COLOR_PORTFOLIO
+            width = FOCUS_LINE_WIDTH
+        else:
+            color = SERIES_COLORS[colour_index % len(SERIES_COLORS)]
+            colour_index += 1
+            width = FOCUS_LINE_WIDTH if symbol == focus else LINE_WIDTH
         _add_line(figure, rebased[symbol], symbol, color, width=width, hover="Index")
     if benchmark in rebased.columns:
         _add_line(figure, rebased[benchmark], benchmark, COLOR_BENCH, width=LINE_WIDTH, hover="Index", dash="dash")
