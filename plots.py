@@ -503,6 +503,72 @@ def rolling_risk_adjusted_chart(
     return figure
 
 
+def allocation_chart(weights: dict[str, float] | None) -> go.Figure | None:
+    """Horizontal bar of portfolio target weights (percent of capital)."""
+    if not weights:
+        return None
+    cleaned = {str(name): float(value) for name, value in weights.items() if float(value) > 0}
+    if not cleaned:
+        return None
+    names = list(cleaned)
+    values = [cleaned[name] * 100.0 for name in names]
+    colors = [SERIES_COLORS[index % len(SERIES_COLORS)] for index in range(len(names))]
+    figure = _figure("Portfolio allocation")
+    figure.add_trace(
+        go.Bar(
+            y=names,
+            x=values,
+            orientation="h",
+            marker_color=colors,
+            hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
+            text=[f"{value:.1f}%" for value in values],
+            textposition="auto",
+        )
+    )
+    figure.update_layout(
+        xaxis_title="Weight (%)",
+        yaxis_title=None,
+        height=max(260, 80 + 36 * len(names)),
+        xaxis=dict(range=[0, max(100.0, max(values) * 1.1)]),
+    )
+    return figure
+
+
+def risk_contribution_chart(risk_contribution: dict[str, float] | None) -> go.Figure | None:
+    """Horizontal bar of each holding's share of portfolio variance."""
+    if not risk_contribution:
+        return None
+    ranked = sorted(
+        ((str(name), float(share)) for name, share in risk_contribution.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if not ranked:
+        return None
+    names = [name for name, _ in ranked]
+    values = [share * 100.0 for _, share in ranked]
+    colors = [SERIES_COLORS[index % len(SERIES_COLORS)] for index in range(len(names))]
+    figure = _figure("Risk contribution")
+    figure.add_trace(
+        go.Bar(
+            y=names,
+            x=values,
+            orientation="h",
+            marker_color=colors,
+            hovertemplate="%{y}: %{x:.1f}% of variance<extra></extra>",
+            text=[f"{value:.1f}%" for value in values],
+            textposition="auto",
+        )
+    )
+    figure.update_layout(
+        xaxis_title="Share of portfolio variance (%)",
+        yaxis_title=None,
+        height=max(260, 80 + 36 * len(names)),
+        xaxis=dict(range=[0, max(100.0, max(values) * 1.1)]),
+    )
+    return figure
+
+
 if __name__ == "__main__":
     # A drawn-by-hand series is enough to prove every chart builds. Real
     # prices arrive through dashboard.py, which is the only orchestrator.

@@ -81,6 +81,21 @@ RANGE_OPTIONS = (*PRESETS, CUSTOM)
 LINE = "Line"
 CANDLES = "Candlestick"
 TABS = ("Compare", "Price", "Drawdown", "Risk", "Returns")
+# In-page section nav. "All sections" keeps the full briefing visible.
+SECTION_ALL = "All sections"
+SECTION_OVERVIEW = "Overview"
+SECTION_COMPARE = "Comparison"
+SECTION_PORTFOLIO = "Portfolio"
+SECTION_CHARTS = "Charts"
+SECTION_NARRATIVE = "Narrative"
+SECTIONS = (
+    SECTION_ALL,
+    SECTION_OVERVIEW,
+    SECTION_COMPARE,
+    SECTION_PORTFOLIO,
+    SECTION_CHARTS,
+    SECTION_NARRATIVE,
+)
 # Suggestions only. In live mode any Yahoo Finance ticker can be typed.
 POPULAR = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM", "JNJ", "KO", "BRK-B")
 PERCENT = 100.0
@@ -88,6 +103,7 @@ RISK_FREE_STEP = 0.25
 DEFAULT_CUSTOM_DAYS = 365
 EARLIEST_PICKABLE = date(1970, 1, 1)
 BOUND = "query-params"
+DATA_MODE_LOCK = "_data_mode_lock"
 # Streamlit Community Cloud draws its own header bar, 3.75rem tall, over
 # the top of the page. Content has to start below it or the first line
 # (the small label above the title) is covered on the hosted app while
@@ -183,6 +199,36 @@ PAGE_CSS = """
     .year-table th, .year-table td {padding: 0.35rem 0.55rem; border-bottom: 1px solid #eef1f5; text-align: right;}
     .year-table th:first-child, .year-table td:first-child {text-align: left;}
     div[data-testid="stTabs"] {margin-top: 0.4rem;}
+    .section-nav {
+        background: #f8fafc;
+        border: 1px solid #e4e8ee;
+        border-radius: 12px;
+        padding: 0.55rem 0.75rem 0.35rem 0.75rem;
+        margin: 0.35rem 0 0.85rem 0;
+    }
+    .callout {
+        background: #fff8eb;
+        border: 1px solid #f0d9a8;
+        border-left: 4px solid #d97706;
+        border-radius: 0 12px 12px 0;
+        padding: 0.7rem 0.95rem;
+        margin: 0.5rem 0 0.9rem 0;
+        color: #3c4756;
+        font-size: 0.92rem;
+        line-height: 1.5;
+    }
+    .callout strong {color: #1c2430;}
+    .error-card {
+        background: #fff5f5;
+        border: 1px solid #f0c4c4;
+        border-left: 4px solid #b91c1c;
+        border-radius: 0 12px 12px 0;
+        padding: 0.7rem 0.95rem;
+        margin: 0.5rem 0 0.9rem 0;
+        color: #3c4756;
+        font-size: 0.92rem;
+        line-height: 1.5;
+    }
     @media (max-width: 900px) {
         .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: TOP_PADDING;}
         h1 {font-size: 1.55rem; line-height: 1.2;}
@@ -194,12 +240,15 @@ PAGE_CSS = """
         .summary-card {padding: 0.2rem 0.7rem 0.45rem 0.7rem;}
         .status-card {font-size: 0.84rem;}
         section[data-testid="stSidebar"] {width: min(100vw, 22rem);}
+        div[data-testid="stTabs"] button {padding-left: 0.55rem; padding-right: 0.55rem;}
     }
     @media (max-width: 640px) {
         .block-container {padding-left: 0.7rem; padding-right: 0.7rem;}
         h1 {font-size: 1.35rem;}
         .kicker {font-size: 0.7rem; letter-spacing: 0.1em;}
         div[data-testid="stHorizontalBlock"] {gap: 0.45rem;}
+        .section-nav {padding: 0.4rem 0.5rem 0.25rem 0.5rem;}
+        .callout, .error-card {font-size: 0.86rem; padding: 0.6rem 0.75rem;}
     }
 </style>
 """.replace("TOP_PADDING", f"{TOP_PADDING_REM}rem")
@@ -214,29 +263,36 @@ def _on_data_mode_change() -> None:
     """
     Live and offline offer different symbols and dates.
 
-    Switching to Offline keeps what the offline demo can serve and
-    records a notice naming anything that was dropped, including a
-    benchmark that is not SPY or QQQ. Switching to Live clears that
-    notice and leaves the current selection alone.
+    Pin the chosen mode in session so a query-param remount cannot snap
+    the radio back to Live on the first click (bind writes the URL a
+    tick later). Symbol filtering for Offline runs in the normal sidebar
+    path after the radio sticks — rewriting symbols here remounted
+    sibling widgets and made the first Offline click look like a no-op.
     """
-    for key in ("focus", "start", "end"):
-        st.session_state.pop(key, None)
-    if st.session_state.get("data") != OFFLINE:
+    mode = st.session_state.get("data")
+    if mode in (LIVE, OFFLINE):
+        st.session_state[DATA_MODE_LOCK] = mode
+    # Focus is mode-specific; custom dates are clamped by the range picker.
+    st.session_state.pop("focus", None)
+    if mode != OFFLINE:
         st.session_state.pop("offline_drop_notes", None)
         st.session_state.pop("offline_intent_symbols", None)
         st.session_state.pop("offline_intent_benchmark", None)
+        st.session_state.pop("offline_intent_captured", None)
         return
+    # Capture intent before bound widgets drop unavailable options.
     requested = list(st.session_state.get("symbols") or [])
     requested.extend(_symbols_named_in_query())
-    benchmark = (
+    if requested:
+        st.session_state.offline_intent_symbols = list(dict.fromkeys(
+            [str(s).strip().upper() for s in requested if str(s).strip()]
+        ))
+    bench = (
         st.session_state.get("benchmark")
         or _benchmark_named_in_query()
         or DEFAULT_BENCHMARK
     )
-    kept, bench, notes = filter_offline_selection(requested, benchmark)
-    st.session_state.symbols = kept
-    st.session_state.benchmark = bench
-    st.session_state.offline_drop_notes = list(notes)
+    st.session_state.offline_intent_benchmark = str(bench).strip().upper()
 
 
 def _capture_offline_intent() -> None:
@@ -353,6 +409,13 @@ def _add_search_hit() -> None:
 
 
 def _mode() -> bool:
+    # Restore a just-chosen mode before the bound radio hydrates from a URL
+    # that may still omit ``data`` (Live is the default and is left out of
+    # the share link). Without this lock the first Offline click can flash
+    # back to Live until a second click writes the query string.
+    locked = st.session_state.get(DATA_MODE_LOCK)
+    if locked in (LIVE, OFFLINE) and st.session_state.get("data") != locked:
+        st.session_state["data"] = locked
     mode = st.sidebar.radio(
         "Data",
         (LIVE, OFFLINE),
@@ -362,6 +425,7 @@ def _mode() -> bool:
         on_change=_on_data_mode_change,
         help="Live data is Yahoo Finance. The offline demo reads only the files shipped with this app.",
     )
+    st.session_state[DATA_MODE_LOCK] = mode
     offline = mode == OFFLINE
     if offline:
         first, last = _offline_span()
@@ -504,10 +568,28 @@ def _portfolio_controls(symbols: list[str]) -> dict:
         bind=BOUND,
         help="Mix the selected symbols into one portfolio line and table row versus the benchmark.",
     )
-    if not enabled or len(usable) < 2:
-        if enabled and len(usable) < 2:
-            st.sidebar.caption("Add at least two symbols to build a portfolio.")
-        return {"portfolio": False, "weights": None, "rebalance": REBALANCE_NONE, "cost_bps": DEFAULT_COST_BPS}
+    if not enabled:
+        return {
+            "portfolio": False,
+            "portfolio_blocked": False,
+            "weights": None,
+            "rebalance": REBALANCE_NONE,
+            "cost_bps": DEFAULT_COST_BPS,
+        }
+    if len(usable) < 2:
+        named = ", ".join(usable) if usable else "none selected"
+        st.sidebar.warning(
+            f"Portfolio mode is on, but a mix needs **at least two symbols**. "
+            f"Right now: {named}. Add another ticker (for example MSFT next to AAPL), "
+            "then weights, rebalance, the green portfolio line, and construction charts appear."
+        )
+        return {
+            "portfolio": False,
+            "portfolio_blocked": True,
+            "weights": None,
+            "rebalance": REBALANCE_NONE,
+            "cost_bps": DEFAULT_COST_BPS,
+        }
 
     labels = {
         REBALANCE_NONE: "None (buy and hold)",
@@ -547,7 +629,13 @@ def _portfolio_controls(symbols: list[str]) -> dict:
         bind=BOUND,
         help="Charged on turnover at inception and at each rebalance. 10 bps = 0.10% of traded notional.",
     )
-    return {"portfolio": True, "weights": weights, "rebalance": rebalance, "cost_bps": float(cost)}
+    return {
+        "portfolio": True,
+        "portfolio_blocked": False,
+        "weights": weights,
+        "rebalance": rebalance,
+        "cost_bps": float(cost),
+    }
 
 
 def _sidebar() -> dict:
@@ -734,11 +822,31 @@ def _metrics(stats) -> None:
     bottom[3].metric(f"Correlation vs {bench}", _number(stats.correlation, "{:.2f}"), help=help_text["correlation"])
     bottom[4].metric("95% hist. VaR", _number(stats.value_at_risk_95, "{:.1%}"), help=help_text.get("value_at_risk_95", ""))
     extra = st.columns(5)
-    extra[0].metric("95% param. VaR", _number(stats.parametric_var_95, "{:.1%}"))
-    extra[1].metric("95% CVaR / ES", _number(stats.cvar_95, "{:.1%}"))
-    extra[2].metric(f"Alpha vs {bench}", _number(stats.alpha, "{:+.1%}"))
-    extra[3].metric("Peak→trough (days)", "—" if stats.drawdown_days_to_trough is None else str(stats.drawdown_days_to_trough))
-    extra[4].metric("Trough→recovery", "—" if stats.drawdown_days_to_recovery is None else str(stats.drawdown_days_to_recovery))
+    extra[0].metric(
+        "95% param. VaR",
+        _number(stats.parametric_var_95, "{:.1%}"),
+        help=help_text.get("parametric_var_95", ""),
+    )
+    extra[1].metric(
+        "95% CVaR / ES",
+        _number(stats.cvar_95, "{:.1%}"),
+        help=help_text.get("cvar_95", ""),
+    )
+    extra[2].metric(
+        f"Alpha vs {bench}",
+        _number(stats.alpha, "{:+.1%}"),
+        help=help_text.get("alpha", ""),
+    )
+    extra[3].metric(
+        "Peak→trough (days)",
+        "—" if stats.drawdown_days_to_trough is None else str(stats.drawdown_days_to_trough),
+        help=help_text.get("drawdown_days_to_trough", ""),
+    )
+    extra[4].metric(
+        "Trough→recovery",
+        "—" if stats.drawdown_days_to_recovery is None else str(stats.drawdown_days_to_recovery),
+        help=help_text.get("drawdown_days_to_recovery", ""),
+    )
     st.caption(
         f"Volatility label: **{label}**. {volatility_rule_text()} "
         f"Longest underwater: {stats.longest_underwater_days if stats.longest_underwater_days is not None else '—'} sessions."
@@ -823,14 +931,16 @@ def _calendar_years(briefing) -> None:
 
 
 def _cost_and_diversification(briefing) -> None:
-    """Portfolio trading costs and diversification stats when available."""
+    """Portfolio trading costs, diversification stats, and allocation charts."""
     cost = briefing.cost_report
     divers = briefing.comparison.diversification
-    if cost is None and divers is None:
+    figures = briefing.figures
+    has_charts = figures.get("allocation") is not None or figures.get("risk_contribution") is not None
+    if cost is None and divers is None and not has_charts:
         return
     st.subheader("Portfolio construction details")
-    cols = st.columns(4)
     if cost is not None:
+        cols = st.columns(4)
         cols[0].metric("Cost setting (bps)", f"{cost.cost_bps:g}")
         cols[1].metric("Total turnover", f"{cost.total_turnover:.2f}")
         cols[2].metric("Fee drag (sum)", f"{cost.total_cost_drag:.2%}")
@@ -848,6 +958,46 @@ def _cost_and_diversification(briefing) -> None:
         listing = ", ".join(f"{name} {share:.0%}" for name, share in ranked)
         dcols[2].metric("Top risk contribution", ranked[0][0] if ranked else "—")
         st.caption(f"Risk contribution by weight: {listing}.")
+    if has_charts:
+        left, right = st.columns(2)
+        with left:
+            _show(figures.get("allocation"), "Allocation chart needs portfolio weights.")
+            st.caption("Target weights after renormalization. Zero-weight symbols are left out.")
+        with right:
+            _show(figures.get("risk_contribution"), "Risk contribution needs a diversified mix.")
+            st.caption("Each bar is that holding's share of portfolio variance.")
+
+
+def _section_nav() -> str:
+    """Compact jump control for the main briefing sections."""
+    st.markdown('<div class="section-nav">', unsafe_allow_html=True)
+    chosen = st.segmented_control(
+        "On this page",
+        SECTIONS,
+        default=SECTION_ALL,
+        required=True,
+        key="section",
+        bind=BOUND,
+        help="Jump to a block of the briefing. All sections keeps the full page visible.",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    return chosen or SECTION_ALL
+
+
+def _show_section(current: str, name: str) -> bool:
+    return current in (SECTION_ALL, name)
+
+
+def _portfolio_blocked_callout(symbols: list[str]) -> None:
+    named = ", ".join(symbols) if symbols else "none selected yet"
+    st.markdown(
+        f'<div class="callout"><strong>Portfolio mode needs two symbols.</strong> '
+        f"It is on, but the mix is waiting. Selected now: {html.escape(named)}. "
+        "Add another ticker in the sidebar (for example MSFT next to AAPL). "
+        "Then target weights, rebalance, the green portfolio line, allocation charts, "
+        "and construction metrics appear.</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _summary(briefing) -> None:
@@ -927,6 +1077,8 @@ def _share_query(request: dict) -> str:
         pairs.append(("tab", request["tab"]))
     if request.get("chart", LINE) != LINE:
         pairs.append(("chart", request["chart"]))
+    if request.get("section", SECTION_ALL) != SECTION_ALL:
+        pairs.append(("section", request["section"]))
     if request.get("portfolio"):
         pairs.append(("portfolio", "True"))
         if request.get("rebalance") and request["rebalance"] != REBALANCE_NONE:
@@ -1086,12 +1238,16 @@ def main() -> None:
         "a window you choose, and see how closely it moved with the benchmark on the dates both traded."
     )
     request.update(_range_picker(request["offline"]))
+    section = _section_nav()
+    request["section"] = section
     offline_notes = tuple(request.get("offline_notes") or ())
     if not request["symbols"]:
         for note in offline_notes:
             st.info(note)
         st.info("Add at least one symbol in the sidebar to build a briefing.")
         return
+    if request.get("portfolio_blocked"):
+        _portfolio_blocked_callout(request["symbols"])
     # Prefer a focus the user already chose; the dashboard falls back if
     # that symbol failed to load. The picker below only offers loaded ones.
     request["focus"] = st.session_state.get("focus")
@@ -1123,16 +1279,22 @@ def main() -> None:
 
     headline.title(_title(loaded, request["benchmark"]))
     _warnings(briefing, offline_notes=offline_notes)
-    _status(briefing)
-    _snapshot(briefing)
-    _metrics(briefing.report.stats)
-    _table(briefing)
-    _cost_and_diversification(briefing)
-    _charts(briefing)
-    _calendar_years(briefing)
-    _summary(briefing)
+    if _show_section(section, SECTION_OVERVIEW):
+        _status(briefing)
+        _snapshot(briefing)
+        _metrics(briefing.report.stats)
+    if _show_section(section, SECTION_COMPARE):
+        _table(briefing)
+    if _show_section(section, SECTION_PORTFOLIO):
+        _cost_and_diversification(briefing)
+    if _show_section(section, SECTION_CHARTS):
+        _charts(briefing)
+    if _show_section(section, SECTION_NARRATIVE):
+        _calendar_years(briefing)
+        _summary(briefing)
     request["tab"] = st.session_state.get("tab") or TABS[0]
     request["chart"] = st.session_state.get("chart") or LINE
+    request["section"] = st.session_state.get("section") or SECTION_ALL
     _take_away(briefing, request)
 
 
