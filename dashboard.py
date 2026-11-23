@@ -25,8 +25,10 @@ from pathlib import Path
 import pandas as pd
 
 from data_loader import (
+    CompanySnapshot,
     MarketDataError,
     PriceHistory,
+    fetch_company_snapshot,
     fetch_history,
     load_offline_history,
     normalize_symbol,
@@ -35,20 +37,30 @@ from features import (
     DEFAULT_RISK_FREE,
     MA_LONG,
     MA_SHORT,
+    PORTFOLIO_LABEL,
     PRESETS,
+    REBALANCE_NONE,
+    REBALANCE_OPTIONS,
     ROLLING_BETA_WINDOW,
     ROLLING_VOL_WINDOW,
     TABLE_FORMATS,
     AnalysisError,
     Comparison,
     PeriodReport,
+    aligned_export,
     build_comparison,
     build_period,
     comparison_table,
+    describe_calendar_years,
     format_cell,
     methodology_notes,
     monthly_table,
+    normalize_weights,
+    portfolio_frame,
+    portfolio_value,
+    shared_sessions,
     validate_average_windows,
+    validate_rebalance,
     validate_risk_free,
     volatility_rule_text,
     window_for_preset,
@@ -94,6 +106,11 @@ class Briefing:
     figures: dict
     markdown: str
     notes: tuple[str, ...]
+    portfolio_report: PeriodReport | None = None
+    portfolio_weights: dict[str, float] | None = None
+    rebalance: str = REBALANCE_NONE
+    snapshot: CompanySnapshot | None = None
+    export_csv: str | None = None
 
     @property
     def stock(self) -> PriceHistory:
@@ -129,6 +146,9 @@ def run_briefing(
     ma_short: int = MA_SHORT,
     ma_long: int = MA_LONG,
     risk_free: float = DEFAULT_RISK_FREE,
+    weights: dict[str, float] | None = None,
+    rebalance: str = REBALANCE_NONE,
+    portfolio: bool = False,
 ) -> Briefing:
     """
     One briefing. Pass ``tickers`` for several symbols, or ``ticker``
@@ -171,8 +191,34 @@ def run_briefing(
     bench_error = bench_error or window_error
 
     chosen = _choose_focus(focus, reports)
-    comparison = build_comparison(reports, benchmark_report)
+    rebalance_mode = validate_rebalance(rebalance)
+    portfolio_report = None
+    weight_map = None
+    portfolio_notes: tuple[str, ...] = ()
+    # A portfolio needs two or more loaded symbols so the mix has something to mix.
+    if portfolio and len(reports) >= 2:
+        portfolio_report, weight_map, portfolio_notes = _build_portfolio(
+            reports,
+            benchmark_report=benchmark_report,
+            bench_history=bench_history,
+            weights=weights,
+            rebalance=rebalance_mode,
+            start=start,
+            end=end,
+            ma_short=ma_short,
+            ma_long=ma_long,
+            risk_free=risk_free,
+        )
+        notes = notes + portfolio_notes
+    elif portfolio and len(reports) < 2:
+        notes = notes + ("Portfolio mode needs at least two loaded symbols.",)
+
+    comparison = build_comparison(reports, benchmark_report, portfolio_report)
     figures = _build_figures(reports[chosen], benchmark_report, comparison)
+    snapshot = _load_snapshot(chosen, offline=offline)
+    export_csv = aligned_export(
+        reports, benchmark_report=benchmark_report, portfolio_report=portfolio_report
+    ).to_csv(index_label="date", float_format="%.8f")
     markdown = render_markdown(
         histories=histories,
         benchmark=bench_history,
@@ -182,6 +228,10 @@ def run_briefing(
         focus=chosen,
         failed=failed,
         notes=notes,
+        portfolio_report=portfolio_report,
+        portfolio_weights=weight_map,
+        rebalance=rebalance_mode,
+        snapshot=snapshot,
     )
     return Briefing(
         histories=histories,
@@ -195,6 +245,11 @@ def run_briefing(
         figures=figures,
         markdown=markdown,
         notes=notes,
+        portfolio_report=portfolio_report,
+        portfolio_weights=weight_map,
+        rebalance=rebalance_mode,
+        snapshot=snapshot,
+        export_csv=export_csv,
     )
 
 
@@ -251,6 +306,10 @@ def render_markdown(
     focus: str,
     failed: dict[str, str],
     notes: tuple[str, ...],
+    portfolio_report: PeriodReport | None = None,
+    portfolio_weights: dict[str, float] | None = None,
+    rebalance: str = REBALANCE_NONE,
+    snapshot: CompanySnapshot | None = None,
 ) -> str:
     """Downloadable summary. The prose is the same sentences as the page."""
     report = reports[focus]
@@ -269,16 +328,26 @@ def render_markdown(
             f"{stats.window_end.date().isoformat()}, {stats.n_days} trading days",
             f"- Moving averages: {stats.ma_short_window} and {stats.ma_long_window} days",
             f"- Risk-free rate: {stats.risk_free_rate:.1%} a year",
-            "",
-            "## Side by side",
-            "",
         ]
     )
+    if portfolio_report is not None and portfolio_weights is not None:
+        weight_text = ", ".join(f"{symbol} {weight:.1%}" for symbol, weight in portfolio_weights.items())
+        lines.append(f"- Portfolio weights: {weight_text} (rebalance: {rebalance})")
+    if snapshot is not None:
+        lines.append(f"- Company snapshot: {_snapshot_line(snapshot)}")
+    lines.extend(["", "## Side by side", ""])
     lines.extend(_markdown_table(comparison_table(comparison)))
     lines.extend(["", f"## {focus} in detail", ""])
     lines.extend(_result_lines(stats))
+    year_line = describe_calendar_years(report.charts.calendar_years, ticker=focus)
+    if year_line:
+        lines.extend(["", year_line])
     lines.extend(["", "### Summary", ""])
     lines.extend(report.sentences)
+    if portfolio_report is not None:
+        lines.extend(["", "## Portfolio", ""])
+        lines.extend(_result_lines(portfolio_report.stats))
+        lines.extend(portfolio_report.sentences)
     if comparison.sentences:
         lines.extend(["", "## Across the symbols", ""])
         lines.extend(comparison.sentences)
@@ -296,7 +365,83 @@ def render_markdown(
     return "\n".join(lines)
 
 
+def _build_portfolio(
+    reports: dict[str, PeriodReport],
+    *,
+    benchmark_report: PeriodReport | None,
+    bench_history: PriceHistory | None,
+    weights: dict[str, float] | None,
+    rebalance: str,
+    start,
+    end,
+    ma_short: int,
+    ma_long: int,
+    risk_free: float,
+) -> tuple[PeriodReport, dict[str, float], tuple[str, ...]]:
+    """Build a portfolio report on shared sessions of the loaded symbols."""
+    weight_map, notes = normalize_weights(weights, list(reports))
+    series = {symbol: reports[symbol].charts.price for symbol in weight_map}
+    shared = shared_sessions(series)
+    value = portfolio_value(shared, weight_map, rebalance=rebalance)
+    bench_frame = None if bench_history is None else bench_history.frame
+    bench_ticker = None if benchmark_report is None else benchmark_report.stats.ticker
+    report = build_period(
+        portfolio_frame(value),
+        ticker=PORTFOLIO_LABEL,
+        start=start,
+        end=end,
+        benchmark=bench_frame,
+        benchmark_ticker=bench_ticker,
+        ma_short=ma_short,
+        ma_long=ma_long,
+        risk_free=risk_free,
+    )
+    mode_note = (
+        "Portfolio rebalances monthly."
+        if rebalance == "monthly"
+        else "Portfolio rebalances quarterly."
+        if rebalance == "quarterly"
+        else "Portfolio is buy-and-hold after the opening weights."
+    )
+    return report, weight_map, notes + (mode_note,)
+
+
+def _load_snapshot(symbol: str, *, offline: bool) -> CompanySnapshot | None:
+    try:
+        return fetch_company_snapshot(symbol, offline=offline)
+    except MarketDataError:
+        return None
+
+
+def _snapshot_line(snapshot: CompanySnapshot) -> str:
+    bits = [snapshot.ticker]
+    if snapshot.name:
+        bits.append(snapshot.name)
+    if snapshot.sector:
+        bits.append(snapshot.sector)
+    if snapshot.market_cap is not None:
+        bits.append(f"mkt cap {_fmt_cap(snapshot.market_cap)}")
+    if snapshot.pe_ratio is not None:
+        bits.append(f"P/E {snapshot.pe_ratio:.1f}")
+    if snapshot.dividend_yield is not None:
+        bits.append(f"div {snapshot.dividend_yield:.2%}")
+    bits.append(f"[{snapshot.source}]")
+    return " · ".join(bits)
+
+
+def _fmt_cap(value: float) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1e12:
+        return f"{value / 1e12:.2f}T"
+    if abs_value >= 1e9:
+        return f"{value / 1e9:.2f}B"
+    if abs_value >= 1e6:
+        return f"{value / 1e6:.2f}M"
+    return f"{value:,.0f}"
+
+
 def _load_symbols(
+
     symbols: list[str],
     *,
     offline: bool,
@@ -461,23 +606,26 @@ def _source_line(history: PriceHistory) -> str:
 
 
 def _result_lines(stats) -> list[str]:
-    gap = (
-        f"- Versus {stats.benchmark}: {stats.excess_return * PERCENT:+.1f} percentage points"
-        if stats.excess_return is not None and stats.benchmark
-        else "- Versus benchmark: not available"
-    )
     return [
-        f"- Cumulative return: {stats.cumulative_return:+.1%}",
-        f"- Annualized return: {_fmt_optional(stats.annualized_return, '{:+.1%}')}",
+        f"- Cumulative return: {_fmt_optional(stats.cumulative_return)}",
+        f"- Annualized return: {_fmt_optional(stats.annualized_return)}",
         f"- Annualized volatility: {_fmt_optional(stats.annualized_volatility)}",
-        f"- Volatility label: {stats.vol_label or 'not ranked'}",
+        f"- Volatility label: {stats.vol_label or 'not available'}",
         f"- Sharpe ratio: {_fmt_optional(stats.sharpe, '{:.2f}')}",
         f"- Sortino ratio: {_fmt_optional(stats.sortino, '{:.2f}')}",
+        f"- 95% historical VaR: {_fmt_optional(stats.value_at_risk_95)}",
         f"- Maximum drawdown: {_fmt_optional(stats.max_drawdown)}",
-        gap,
+        (
+            f"- Versus {stats.benchmark}: "
+            f"{_fmt_optional(None if stats.excess_return is None else stats.excess_return * 100, '{:+.1f}')} "
+            "percentage points"
+            if stats.benchmark
+            else "- Versus benchmark: not available"
+        ),
         f"- Beta: {_fmt_optional(stats.beta, '{:.2f}')}",
         f"- Correlation: {_fmt_optional(stats.correlation, '{:.2f}')}",
     ]
+
 
 
 def _markdown_table(table: pd.DataFrame) -> list[str]:
@@ -527,6 +675,18 @@ def _fetched_label(history: PriceHistory | None) -> str:
     return stamp.strftime("%Y-%m-%d %H:%M UTC") + cache
 
 
+def _parse_weight_args(entries: list[str] | None) -> dict[str, float] | None:
+    if not entries:
+        return None
+    weights: dict[str, float] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise AnalysisError(f"Weight '{entry}' must look like AAPL=0.4.")
+        symbol, raw = entry.split("=", 1)
+        weights[normalize_symbol(symbol)] = float(raw)
+    return weights
+
+
 def _fmt_optional(value: float | None, pattern: str = "{:.1%}") -> str:
     if value is None:
         return "not available"
@@ -566,7 +726,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use the bundled AAPL, MSFT, SPY and QQQ files. No network.",
     )
     parser.add_argument("--refresh", action="store_true", help="Ignore a fresh cache and download again.")
+    parser.add_argument(
+        "--portfolio",
+        action="store_true",
+        help="Build an equal-weight (or --weight) portfolio of the symbols.",
+    )
+    parser.add_argument(
+        "--weight",
+        action="append",
+        default=None,
+        metavar="SYMBOL=FRACTION",
+        help="Portfolio weight, e.g. AAPL=0.4. Repeat per symbol. Default is equal weight.",
+    )
+    parser.add_argument(
+        "--rebalance",
+        default=REBALANCE_NONE,
+        choices=REBALANCE_OPTIONS,
+        help="Portfolio rebalance schedule: none, monthly, or quarterly.",
+    )
     parser.add_argument("--output", default=OUTPUT_MD)
+    parser.add_argument("--csv", default=None, help="Also write the aligned price/return CSV to this path.")
     return parser.parse_args(argv)
 
 
@@ -579,6 +758,7 @@ def main(argv: list[str] | None = None) -> Path:
             raise AnalysisError("Pass both --start and --end, or neither.")
         start, end = args.start, args.end
         preset = None
+    weight_map = _parse_weight_args(args.weight)
     briefing = run_briefing(
         ticker=args.ticker,
         tickers=args.tickers,
@@ -592,9 +772,15 @@ def main(argv: list[str] | None = None) -> Path:
         ma_short=args.ma_short,
         ma_long=args.ma_long,
         risk_free=args.risk_free / PERCENT,
+        weights=weight_map,
+        rebalance=args.rebalance,
+        portfolio=args.portfolio or bool(weight_map),
     )
     path = Path(args.output)
     path.write_text(briefing.markdown, encoding="utf-8")
+    if args.csv and briefing.export_csv:
+        Path(args.csv).write_text(briefing.export_csv, encoding="utf-8")
+        print(f"Saved CSV to {args.csv}")
     for sentence in briefing.report.sentences:
         print(sentence)
     for sentence in briefing.comparison.sentences:
