@@ -101,11 +101,91 @@ class PriceHistory:
 
 
 @dataclass(frozen=True)
+class CompanySnapshot:
+    """Public company facts for the focused symbol. Fields may be missing."""
+
+    ticker: str
+    name: str | None
+    sector: str | None
+    industry: str | None
+    market_cap: float | None
+    pe_ratio: float | None
+    dividend_yield: float | None
+    fifty_two_week_low: float | None
+    fifty_two_week_high: float | None
+    currency: str | None
+    source: str
+    offline: bool = False
+
+
+@dataclass(frozen=True)
 class SymbolHit:
     symbol: str
     name: str
     quote_type: str
     exchange: str
+
+
+# Snapshot placeholders for the offline demo. Figures are illustrative of
+# the mid-2010s sample era and are labelled as offline on the page.
+OFFLINE_SNAPSHOTS = {
+    "AAPL": CompanySnapshot(
+        ticker="AAPL",
+        name="Apple Inc.",
+        sector="Technology",
+        industry="Consumer Electronics",
+        market_cap=600_000_000_000.0,
+        pe_ratio=15.0,
+        dividend_yield=0.018,
+        fifty_two_week_low=90.0,
+        fifty_two_week_high=135.0,
+        currency="USD",
+        source="Offline demo placeholder (not live fundamentals)",
+        offline=True,
+    ),
+    "MSFT": CompanySnapshot(
+        ticker="MSFT",
+        name="Microsoft Corporation",
+        sector="Technology",
+        industry="Software—Infrastructure",
+        market_cap=450_000_000_000.0,
+        pe_ratio=20.0,
+        dividend_yield=0.022,
+        fifty_two_week_low=40.0,
+        fifty_two_week_high=65.0,
+        currency="USD",
+        source="Offline demo placeholder (not live fundamentals)",
+        offline=True,
+    ),
+    "SPY": CompanySnapshot(
+        ticker="SPY",
+        name="SPDR S&P 500 ETF Trust",
+        sector="ETF",
+        industry="Large Blend",
+        market_cap=200_000_000_000.0,
+        pe_ratio=None,
+        dividend_yield=0.018,
+        fifty_two_week_low=180.0,
+        fifty_two_week_high=230.0,
+        currency="USD",
+        source="Offline demo placeholder (not live fundamentals)",
+        offline=True,
+    ),
+    "QQQ": CompanySnapshot(
+        ticker="QQQ",
+        name="Invesco QQQ Trust",
+        sector="ETF",
+        industry="Large Growth",
+        market_cap=50_000_000_000.0,
+        pe_ratio=None,
+        dividend_yield=0.008,
+        fifty_two_week_low=95.0,
+        fifty_two_week_high=135.0,
+        currency="USD",
+        source="Offline demo placeholder (not live fundamentals)",
+        offline=True,
+    ),
+}
 
 
 def normalize_symbol(raw: str) -> str:
@@ -331,7 +411,99 @@ def search_symbols(query: str, limit: int = 8) -> list[SymbolHit]:
     return hits
 
 
+def fetch_company_snapshot(symbol: str, *, offline: bool = False) -> CompanySnapshot:
+    """
+    Name, sector, size and a few valuation fields for one symbol.
+
+    Offline mode returns a clearly labelled placeholder for bundled
+    symbols. Live mode reads yfinance ``info`` and leaves missing fields
+    blank rather than inventing numbers.
+    """
+    ticker = normalize_symbol(symbol)
+    if offline:
+        if ticker in OFFLINE_SNAPSHOTS:
+            return OFFLINE_SNAPSHOTS[ticker]
+        return CompanySnapshot(
+            ticker=ticker,
+            name=None,
+            sector=None,
+            industry=None,
+            market_cap=None,
+            pe_ratio=None,
+            dividend_yield=None,
+            fifty_two_week_low=None,
+            fifty_two_week_high=None,
+            currency=None,
+            source="Offline demo — no fundamentals bundled for this symbol",
+            offline=True,
+        )
+
+    try:
+        import yfinance as yf
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            info = yf.Ticker(ticker).info or {}
+    except Exception as exc:
+        raise MarketDataError(
+            f"Company facts for {ticker} are unavailable right now. {exc}"
+        ) from exc
+
+    if not info or (info.get("trailingPegRatio") is None and info.get("shortName") is None and info.get("symbol") is None and len(info) < 5):
+        # yfinance sometimes returns a nearly empty dict for unknown tickers.
+        raise MarketDataError(
+            f"No company facts for {ticker}. The symbol may not exist, or Yahoo may not be answering."
+        )
+
+    def _num(*keys: str) -> float | None:
+        for key in keys:
+            raw = info.get(key)
+            if raw is None or raw == "None":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value != value:  # NaN
+                continue
+            return value
+        return None
+
+    def _text(*keys: str) -> str | None:
+        for key in keys:
+            raw = info.get(key)
+            if raw is None:
+                continue
+            text_value = str(raw).strip()
+            if text_value and text_value.lower() != "none":
+                return text_value
+        return None
+
+    # Prefer trailingAnnualDividendYield: Yahoo's dividendYield field is
+    # often a percent-like number (e.g. 0.32 for 0.32%) that is easy to
+    # misread as a fraction. Values above 25% are treated as percent.
+    dividend = _num("trailingAnnualDividendYield", "dividendYield", "yield")
+    if dividend is not None and dividend > 0.25:
+        dividend = dividend / 100.0
+
+    return CompanySnapshot(
+        ticker=ticker,
+        name=_text("shortName", "longName", "name"),
+        sector=_text("sector", "category"),
+        industry=_text("industry", "industryDisp"),
+        market_cap=_num("marketCap", "totalAssets"),
+        pe_ratio=_num("trailingPE", "forwardPE"),
+        dividend_yield=dividend,
+        fifty_two_week_low=_num("fiftyTwoWeekLow"),
+        fifty_two_week_high=_num("fiftyTwoWeekHigh"),
+        currency=_text("currency"),
+        source="Yahoo Finance via yfinance (company info)",
+        offline=False,
+    )
+
+
 def slice_history(frame: pd.DataFrame, start, end) -> pd.DataFrame:
+
     """Inclusive calendar slice. The caller checks that it is non-empty."""
     start_ts = pd.Timestamp(start).tz_localize(None).normalize()
     end_ts = pd.Timestamp(end).tz_localize(None).normalize()
@@ -603,3 +775,8 @@ if __name__ == "__main__":
             f"  rows {len(history.frame)}  "
             f"{history.frame.index.min().date()} -> {history.latest_bar.date()}"
         )
+
+    print("Offline snapshots:")
+    for symbol in offline_symbols():
+        snap = fetch_company_snapshot(symbol, offline=True)
+        print(f"  {snap.ticker}: {snap.name} / {snap.sector} ({snap.source})")
