@@ -206,6 +206,12 @@ AAPL's file starts ten sessions after the others and ends one session earlier. I
 
 ![Offline demo, AAPL and MSFT against QQQ](docs/screenshots/offline_demo.png)
 
+![Offline portfolio mode with company snapshot and 95% VaR](docs/screenshots/portfolio_overview.png)
+
+![Portfolio row and green portfolio line on Compare](docs/screenshots/portfolio_compare.png)
+
+![Company-name search: apple suggests AAPL](docs/screenshots/company_search.png)
+
 ## How the figures are defined
 
 All figures use the adjusted close. The same text is on the page under **How every figure and label is defined**, written from the constants the code uses.

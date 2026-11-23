@@ -19,7 +19,6 @@ from features import (
     REBALANCE_QUARTERLY,
     AnalysisError,
     aligned_export,
-    build_comparison,
     build_period,
     calendar_year_returns,
     comparison_table,
