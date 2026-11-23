@@ -44,6 +44,17 @@ Definitions, in one place so the label cannot drift from the prose:
   close over the previous month's last, with the window's first close
   as the base of the first month. Compounded, they equal the cumulative
   return.
+* 95% historical Value at Risk is the loss magnitude of the 5th
+  percentile of daily simple returns in the window. A VaR of 2.1%
+  means that on 95% of days the return was better than −2.1%.
+* Calendar-year returns are the cumulative return from the first close
+  in each calendar year inside the window to the last close of that
+  year (or the window end for the final partial year).
+* A portfolio is a weighted mix of the selected symbols on shared
+  sessions. Weights are normalized to sum to one. With no rebalance,
+  the mix drifts with prices after the first day. Monthly or quarterly
+  rebalance resets to the target weights on the first shared session
+  of each period.
 """
 
 from __future__ import annotations
@@ -87,6 +98,18 @@ CORRELATION_STRONG = 0.7
 CORRELATION_WEAK = 0.3
 REBASE_LEVEL = 100.0
 _EPSILON = 1e-12
+# Historical VaR: the left-tail percentile of daily simple returns.
+VAR_CONFIDENCE = 0.95
+VAR_PERCENTILE = 1.0 - VAR_CONFIDENCE
+MIN_RETURNS_FOR_VAR = 20
+PORTFOLIO_LABEL = "Portfolio"
+REBALANCE_NONE = "none"
+REBALANCE_MONTHLY = "monthly"
+REBALANCE_QUARTERLY = "quarterly"
+REBALANCE_OPTIONS = (REBALANCE_NONE, REBALANCE_MONTHLY, REBALANCE_QUARTERLY)
+# Weights that sum within half a percentage point are treated as intentional
+# and renormalized. Larger gaps get the same treatment with an explicit note.
+WEIGHT_SUM_TOLERANCE = 0.005
 
 PRESETS = ("1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "Max")
 _PRESET_MONTHS = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
@@ -162,6 +185,7 @@ class PeriodStats:
     down_capture: float | None
     up_days: int
     down_days: int
+    value_at_risk_95: float | None
 
 
 @dataclass(frozen=True)
@@ -178,6 +202,7 @@ class ChartData:
     rolling_beta: pd.Series | None
     rolling_correlation: pd.Series | None
     aligned: pd.DataFrame | None
+    calendar_years: pd.Series
 
 
 @dataclass(frozen=True)
@@ -190,12 +215,13 @@ class PeriodReport:
 
 @dataclass(frozen=True)
 class Comparison:
-    """Several symbols over one requested range, plus the benchmark's own row."""
+    """Several symbols over one requested range, optional portfolio, plus the benchmark."""
 
     rows: tuple[PeriodStats, ...]
     benchmark: str | None
     rebased: pd.DataFrame | None
     sentences: tuple[str, ...]
+    portfolio: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +290,19 @@ def methodology_notes(ma_short: int = MA_SHORT, ma_long: int = MA_LONG) -> tuple
         "The side-by-side table gives each symbol its own sessions inside the "
         "requested range. The rebased chart starts every line at "
         f"{REBASE_LEVEL:.0f} on the first session all of them share.",
+        f"95% historical Value at Risk is minus the {VAR_PERCENTILE:.0%} "
+        "percentile of daily simple returns in the window. It needs at least "
+        f"{MIN_RETURNS_FOR_VAR} daily returns. A VaR of 2% means that on "
+        f"{VAR_CONFIDENCE:.0%} of days the return was better than −2%.",
+        "Calendar-year returns chain inside each year of the window: the last "
+        "close of that year (or the window end) over the first close of that "
+        "year (or the window start for a partial first year), minus one.",
+        "Portfolio weights are fractions of capital that sum to one. Equal "
+        "weight is the default. Weights that do not sum to one are "
+        "renormalized and named in a note. A zero-weight symbol is left out "
+        "of the mix. With no rebalance the mix drifts after day one; monthly "
+        "or quarterly rebalance resets to the target weights on the first "
+        "shared session of each period.",
     )
 
 
@@ -320,6 +359,10 @@ def metric_help() -> dict[str, str]:
         ),
         "beta": beta_rule_text(),
         "correlation": correlation_rule_text(),
+        "value_at_risk_95": (
+            f"Loss magnitude of the {VAR_PERCENTILE:.0%} percentile of daily "
+            f"simple returns (95% historical VaR)."
+        ),
     }
 
 
@@ -750,6 +793,221 @@ def shared_sessions(series: dict[str, pd.Series]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Value at Risk and calendar-year returns
+# ---------------------------------------------------------------------------
+
+
+def historical_var(returns: pd.Series, *, confidence: float = VAR_CONFIDENCE) -> float:
+    """
+    95% historical VaR as a positive loss fraction.
+
+    The left-tail percentile of daily simple returns, negated. A result
+    of 0.021 means that on 95% of days the return was better than -2.1%.
+    """
+    if not 0.5 < confidence < 1.0:
+        raise AnalysisError("VaR confidence must sit between 50% and 100%.")
+    clean = _finite(returns)
+    if len(clean) < MIN_RETURNS_FOR_VAR:
+        raise AnalysisError(
+            f"Historical VaR needs at least {MIN_RETURNS_FOR_VAR} daily returns."
+        )
+    tail = float(np.quantile(clean.to_numpy(), 1.0 - confidence))
+    # A positive tail (every day was a gain) still reports zero loss floor.
+    return float(max(-tail, 0.0))
+
+
+def calendar_year_returns(prices: pd.Series) -> pd.Series:
+    """
+    Cumulative return inside each calendar year of ``prices``.
+
+    The first year starts at the first close in the series. The last year
+    ends at the last close. Partial years are allowed and labelled by year.
+    """
+    series = prices.astype(float).dropna()
+    if len(series) < MIN_PRICES:
+        raise AnalysisError("Calendar-year returns need two adjusted closes.")
+    years = series.index.year
+    out: dict[int, float] = {}
+    for year in sorted(set(years)):
+        chunk = series.loc[years == year]
+        if len(chunk) < MIN_PRICES:
+            # A single print in a year has no return inside that year.
+            continue
+        out[int(year)] = float(chunk.iloc[-1] / chunk.iloc[0] - 1.0)
+    if not out:
+        raise AnalysisError("No calendar year inside the window has two closes.")
+    return pd.Series(out, name="calendar_return")
+
+
+# ---------------------------------------------------------------------------
+# Portfolio mix of several symbols
+# ---------------------------------------------------------------------------
+
+
+def validate_rebalance(rebalance: str) -> str:
+    key = (rebalance or REBALANCE_NONE).strip().lower()
+    if key not in REBALANCE_OPTIONS:
+        raise AnalysisError(
+            f"Unknown rebalance '{rebalance}'. Use none, monthly, or quarterly."
+        )
+    return key
+
+
+def normalize_weights(
+    weights: dict[str, float] | None,
+    symbols: list[str] | tuple[str, ...],
+) -> tuple[dict[str, float], tuple[str, ...]]:
+    """
+    Turn raw weights into a usable mix.
+
+    Missing symbols default to equal weight across the list. Zero-weight
+    symbols are dropped. Negative weights are rejected. Weights that do
+    not sum to one are renormalized and named in a note.
+    """
+    notes: list[str] = []
+    ordered = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+    if not ordered:
+        raise AnalysisError("A portfolio needs at least one symbol.")
+    ordered = list(dict.fromkeys(ordered))
+
+    if not weights:
+        equal = 1.0 / len(ordered)
+        return {symbol: equal for symbol in ordered}, (
+            f"Equal weight: each of the {len(ordered)} symbols starts at {equal:.1%}.",
+        )
+
+    cleaned: dict[str, float] = {}
+    for symbol in ordered:
+        raw = weights.get(symbol, weights.get(symbol.lower(), 0.0))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise AnalysisError(f"Weight for {symbol} is not a number.") from exc
+        if value < 0:
+            raise AnalysisError(
+                f"Weight for {symbol} is {value}. Portfolio weights cannot be negative."
+            )
+        if value > _EPSILON:
+            cleaned[symbol] = value
+
+    skipped = [symbol for symbol in ordered if symbol not in cleaned]
+    if skipped:
+        notes.append(
+            f"{', '.join(skipped)} "
+            f"{'has' if len(skipped) == 1 else 'have'} zero weight and "
+            f"{'is' if len(skipped) == 1 else 'are'} left out of the portfolio."
+        )
+    if not cleaned:
+        raise AnalysisError(
+            "Every symbol has zero weight. Give at least one symbol a positive weight."
+        )
+
+    total = float(sum(cleaned.values()))
+    if total <= _EPSILON:
+        raise AnalysisError("Portfolio weights sum to zero.")
+    if abs(total - 1.0) > WEIGHT_SUM_TOLERANCE:
+        notes.append(
+            f"Weights summed to {total:.1%}, so each was scaled to total 100%."
+        )
+    elif abs(total - 1.0) > _EPSILON:
+        notes.append(
+            f"Weights summed to {total:.1%} and were nudged to total 100%."
+        )
+    normalized = {symbol: value / total for symbol, value in cleaned.items()}
+    return normalized, tuple(notes)
+
+
+def portfolio_value(
+    prices: pd.DataFrame,
+    weights: dict[str, float],
+    *,
+    rebalance: str = REBALANCE_NONE,
+) -> pd.Series:
+    """
+    Portfolio level starting at 1.0 on the first shared session.
+
+    ``prices`` is a column per symbol of adjusted closes on shared dates.
+    With no rebalance the opening mix drifts. Monthly or quarterly
+    rebalance resets to ``weights`` on the first session of each period.
+    """
+    mode = validate_rebalance(rebalance)
+    if prices is None or prices.empty:
+        raise AnalysisError("A portfolio needs shared price history.")
+    missing = [symbol for symbol in weights if symbol not in prices.columns]
+    if missing:
+        raise AnalysisError(f"No prices for portfolio symbol(s): {', '.join(missing)}.")
+    frame = prices.loc[:, list(weights)].astype(float).dropna(how="any")
+    if len(frame) < MIN_PRICES:
+        raise AnalysisError(
+            "The portfolio needs at least two shared sessions across its symbols."
+        )
+
+    # Target weights as a vector aligned to columns.
+    target = np.array([weights[column] for column in frame.columns], dtype=float)
+    levels = frame.to_numpy(dtype=float)
+    value = np.empty(len(frame), dtype=float)
+    holdings = target * 1.0 / levels[0]
+    value[0] = 1.0
+    periods = frame.index.to_period("M" if mode == REBALANCE_MONTHLY else "Q")
+
+    for i in range(1, len(frame)):
+        if mode != REBALANCE_NONE and periods[i] != periods[i - 1]:
+            # First session of a new month or quarter: reset to target weights.
+            holdings = target * value[i - 1] / levels[i]
+        value[i] = float(np.dot(holdings, levels[i]))
+        if mode == REBALANCE_NONE:
+            # Buy-and-hold: holdings stay fixed in shares.
+            pass
+    return pd.Series(value, index=frame.index, name=PORTFOLIO_LABEL)
+
+
+def portfolio_frame(value: pd.Series) -> pd.DataFrame:
+    """Synthetic OHLC so build_period can treat the portfolio like a symbol."""
+    level = value.astype(float)
+    return pd.DataFrame(
+        {
+            "open": level,
+            "high": level,
+            "low": level,
+            "close": level,
+            "volume": 0.0,
+            "adj_close": level,
+        },
+        index=level.index,
+    )
+
+
+def aligned_export(
+    reports: dict[str, "PeriodReport"],
+    *,
+    benchmark_report: "PeriodReport | None" = None,
+    portfolio_report: "PeriodReport | None" = None,
+) -> pd.DataFrame:
+    """
+    Shared-session prices and daily returns for CSV download.
+
+    Columns are ``{symbol}_price`` and ``{symbol}_return``. The portfolio
+    and benchmark are included when present. Returns on the first row
+    stay blank.
+    """
+    series: dict[str, pd.Series] = {
+        symbol: report.charts.price for symbol, report in reports.items()
+    }
+    if portfolio_report is not None:
+        series[PORTFOLIO_LABEL] = portfolio_report.charts.price
+    if benchmark_report is not None:
+        series[benchmark_report.stats.ticker] = benchmark_report.charts.price
+    shared = shared_sessions(series)
+    if shared.empty:
+        raise AnalysisError("No shared sessions to export.")
+    columns: dict[str, pd.Series] = {}
+    for name in shared.columns:
+        columns[f"{name}_price"] = shared[name]
+        columns[f"{name}_return"] = shared[name].pct_change()
+    return pd.DataFrame(columns, index=shared.index)
+
+
+# ---------------------------------------------------------------------------
 # One symbol over one window
 # ---------------------------------------------------------------------------
 
@@ -792,6 +1050,9 @@ def build_period(
     reward = _reward_fields(window, returns, rate)
     relative, relative_charts = _relative_fields(prices, window, benchmark, benchmark_ticker)
 
+    years = _optional(calendar_year_returns, window)
+    if years is None:
+        years = pd.Series(dtype=float, name="calendar_return")
     stats = PeriodStats(
         ticker=ticker,
         benchmark=benchmark_ticker if benchmark is not None else None,
@@ -814,6 +1075,7 @@ def build_period(
         # It stays blank while that session is still inside the warmup.
         ma_short=_value_on(ma_short_full, last_day),
         ma_long=_value_on(ma_long_full, last_day),
+        value_at_risk_95=_optional(historical_var, returns),
         **risk,
         **reward,
         **relative,
@@ -827,6 +1089,7 @@ def build_period(
         rolling_vol=rolling_annualized_volatility(full_returns).reindex(window.index),
         returns=returns,
         monthly=monthly_returns(window),
+        calendar_years=years,
         **relative_charts,
     )
     sentences = clamp_notes + describe_period(stats)
@@ -948,15 +1211,22 @@ def _relative_fields(
 def build_comparison(
     reports: dict[str, PeriodReport],
     benchmark_report: PeriodReport | None = None,
+    portfolio_report: PeriodReport | None = None,
 ) -> Comparison:
     """
     Line up the symbols' reports. Each row keeps that symbol's own
     sessions. The rebased frame keeps only sessions every line shares.
+    An optional portfolio row sits above the benchmark.
     """
     if not reports:
         raise AnalysisError("A comparison needs at least one symbol.")
     rows = [report.stats for report in reports.values()]
     series = {symbol: report.charts.price for symbol, report in reports.items()}
+    portfolio_name = None
+    if portfolio_report is not None:
+        portfolio_name = portfolio_report.stats.ticker
+        rows.append(portfolio_report.stats)
+        series[portfolio_name] = portfolio_report.charts.price
     benchmark = None
     if benchmark_report is not None:
         benchmark = benchmark_report.stats.ticker
@@ -965,9 +1235,17 @@ def build_comparison(
     shared = shared_sessions(series)
     rebased = rebase(shared) if len(shared) >= MIN_PRICES else None
     symbol_rows = tuple(report.stats for report in reports.values())
+    if portfolio_report is not None:
+        symbol_rows = symbol_rows + (portfolio_report.stats,)
     benchmark_stats = None if benchmark_report is None else benchmark_report.stats
     sentences = describe_comparison(symbol_rows, benchmark_stats, rebased)
-    return Comparison(rows=tuple(rows), benchmark=benchmark, rebased=rebased, sentences=sentences)
+    return Comparison(
+        rows=tuple(rows),
+        benchmark=benchmark,
+        rebased=rebased,
+        sentences=sentences,
+        portfolio=portfolio_name,
+    )
 
 
 def comparison_table(comparison: Comparison) -> pd.DataFrame:
@@ -975,10 +1253,17 @@ def comparison_table(comparison: Comparison) -> pd.DataFrame:
     records = []
     for stats in comparison.rows:
         is_benchmark = stats.ticker == comparison.benchmark
+        is_portfolio = comparison.portfolio is not None and stats.ticker == comparison.portfolio
         gap = None if stats.excess_return is None else stats.excess_return * 100.0
+        if is_benchmark:
+            label = f"{stats.ticker} (benchmark)"
+        elif is_portfolio:
+            label = f"{stats.ticker}"
+        else:
+            label = stats.ticker
         records.append(
             {
-                "Symbol": f"{stats.ticker} (benchmark)" if is_benchmark else stats.ticker,
+                "Symbol": label,
                 "Return": stats.cumulative_return,
                 "Annualized return": stats.annualized_return,
                 "Volatility": stats.annualized_volatility,
@@ -1101,6 +1386,7 @@ def describe_period(stats: PeriodStats) -> tuple[str, ...]:
         _return_sentence(stats),
         _volatility_sentence(stats),
         _ratio_sentence(stats),
+        _var_sentence(stats),
         _drawdown_sentence(stats),
         _extreme_sentence(stats),
         _average_sentence(stats),
@@ -1180,6 +1466,27 @@ def _ratio_sentence(stats: PeriodStats) -> str:
     if stats.sharpe < 0:
         return text + " Both are negative because the average daily return was below that rate."
     return text
+
+
+def _var_sentence(stats: PeriodStats) -> str:
+    if stats.value_at_risk_95 is None:
+        return (
+            f"95% historical Value at Risk is omitted: it needs at least "
+            f"{MIN_RETURNS_FOR_VAR} daily returns, and this window has {stats.n_returns}."
+        )
+    return (
+        f"95% historical Value at Risk is {stats.value_at_risk_95:.1%}: on "
+        f"{VAR_CONFIDENCE:.0%} of the {stats.n_returns} days the return was better than "
+        f"−{stats.value_at_risk_95:.1%}."
+    )
+
+
+def describe_calendar_years(years: pd.Series, *, ticker: str) -> str:
+    """One sentence listing each calendar year's return inside the window."""
+    if years is None or len(years) == 0:
+        return ""
+    listing = ", ".join(f"{int(year)} {value:+.1%}" for year, value in years.items())
+    return f"{ticker} calendar-year returns inside the window: {listing}."
 
 
 def _drawdown_sentence(stats: PeriodStats) -> str:
@@ -1411,10 +1718,27 @@ if __name__ == "__main__":
         for symbol in ("AAPL", "MSFT")
     }
     spy_report = build_period(bundled["SPY"].frame, ticker="SPY", start=start, end=end)
-    comparison = build_comparison(reports, spy_report)
+    prices = shared_sessions({symbol: reports[symbol].charts.price for symbol in reports})
+    weights, weight_notes = normalize_weights(None, list(reports))
+    value = portfolio_value(prices, weights, rebalance=REBALANCE_MONTHLY)
+    portfolio = build_period(
+        portfolio_frame(value),
+        ticker=PORTFOLIO_LABEL,
+        start=start,
+        end=end,
+        benchmark=bundled["SPY"].frame,
+        benchmark_ticker="SPY",
+        ma_short=20,
+        ma_long=50,
+    )
+    comparison = build_comparison(reports, spy_report, portfolio)
     for sentence in reports["AAPL"].sentences:
         print(sentence)
     print("---")
+    print(describe_calendar_years(reports["AAPL"].charts.calendar_years, ticker="AAPL"))
+    print("---")
+    for note in weight_notes:
+        print(note)
     for sentence in comparison.sentences:
         print(sentence)
     print("---")
