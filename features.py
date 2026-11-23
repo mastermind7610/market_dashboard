@@ -1057,7 +1057,7 @@ def diversification_stats(
 
     Diversification ratio is the weighted average of standalone volatilities
     divided by the portfolio volatility. Effective N is 1 / Σ w_i².
-    Risk contribution for i is w_i × (Σw)_i / σ_p, as a share of variance.
+    Risk contribution for i is w_i × (Σw)_i / σ_p² (share of portfolio variance).
     """
     cleaned, _ = normalize_weights(weights, list(weights))
     cols = [symbol for symbol in cleaned if symbol in returns.columns]

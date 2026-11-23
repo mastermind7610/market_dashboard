@@ -72,6 +72,7 @@ from features import (
     volatility_rule_text,
 )
 from plots import PLOTLY_CONFIG
+from version_info import build_label
 
 # The option text is also the value a shared link carries (?data=Offline),
 # because a bound widget writes what it displays.
@@ -257,6 +258,9 @@ PAGE_CSS = """
         color: #5c6b7a;
         font-size: 0.84rem;
         margin-top: 0.55rem;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        * {scroll-behavior: auto !important;}
     }
     .error-card {
         background: #fff5f5;
@@ -655,6 +659,7 @@ def _portfolio_controls(symbols: list[str]) -> dict:
             value=float(round(equal, 2)),
             step=1.0,
             key=f"w_{symbol}",
+            bind=BOUND,
             help="Zero leaves this symbol out of the mix. Weights are scaled to 100% if they do not already sum to it.",
         )
         weights[symbol] = float(percent) / PERCENT
@@ -821,7 +826,7 @@ def _warnings(briefing, offline_notes: tuple[str, ...] = ()) -> None:
     if briefing.stale:
         st.warning(
             f"Yahoo Finance did not answer for {', '.join(briefing.stale)}. "
-            f"The page is showing the previous download, which is older than {CACHE_TTL_HOURS} hours. "
+            "The page is showing the previous download (expired or kept after a failed refresh). "
             "The fetch time below is when that download was made."
         )
 
@@ -832,7 +837,7 @@ def _fetched_text(history) -> str:
     stamp = history.fetched_at
     stamp = stamp.tz_convert("UTC") if stamp.tzinfo else stamp.tz_localize("UTC")
     if history.stale:
-        freshness = "older download, Yahoo did not answer"
+        freshness = "previous download (Yahoo did not answer)"
     elif history.from_cache:
         freshness = "cached download"
     else:
@@ -1233,6 +1238,18 @@ def _share_query(request: dict) -> str:
         pairs.append(("portfolio", "True"))
         if request.get("rebalance") and request["rebalance"] != REBALANCE_NONE:
             pairs.append(("rebalance", request["rebalance"]))
+        weight_map = request.get("weights") or {}
+        symbols = [symbol for symbol in request["symbols"] if symbol in weight_map]
+        if symbols:
+            equal = 1.0 / len(symbols)
+            for symbol in symbols:
+                weight = float(weight_map[symbol])
+                # Omit equal-weight defaults so the address stays short.
+                if abs(weight - equal) > 1e-6:
+                    pairs.append((f"w_{symbol}", f"{weight * PERCENT:g}"))
+        cost = request.get("cost_bps")
+        if cost is not None and abs(float(cost) - float(DEFAULT_COST_BPS)) > 1e-9:
+            pairs.append(("cost_bps", f"{float(cost):g}"))
     return urlencode(pairs)
 
 
@@ -1449,6 +1466,10 @@ def main() -> None:
     request["chart"] = st.session_state.get("chart") or LINE
     request["section"] = st.session_state.get("section") or SECTION_ALL
     _take_away(briefing, request)
+    st.caption(
+        f"Build {build_label()}. If this SHA does not match the latest main after a merge, "
+        "reboot the Streamlit Cloud app so it pulls the new commit."
+    )
 
 
 main()

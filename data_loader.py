@@ -22,6 +22,8 @@ import logging
 import re
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +45,10 @@ CACHE_TTL_HOURS = 12
 # click Refresh. Empty responses are never written to the cache.
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAYS_SECONDS = (0.8, 1.6)
+# Hard ceiling for one Yahoo attempt so a hung socket cannot freeze Streamlit.
+DOWNLOAD_TIMEOUT_SECONDS = 30
+SEARCH_TIMEOUT_SECONDS = 15
+SNAPSHOT_TIMEOUT_SECONDS = 15
 
 YAHOO_SOURCE = "Yahoo Finance via yfinance (auto-adjusted OHLC)"
 OFFLINE_AAPL_SOURCE = (
@@ -361,10 +367,22 @@ def fetch_history(
     try:
         frame = _download_yahoo(ticker)
     except MarketDataError:
-        expired = _read_cache(ticker, directory, allow_expired=True)
-        if expired is None:
+        # Any download failure falls back to disk when possible. Mark stale
+        # even if the file is still inside the TTL so a failed Refresh is
+        # visible (otherwise a fresh cache looks like a successful fetch).
+        cached = _read_cache(ticker, directory, allow_expired=True)
+        if cached is None:
             raise
-        return expired
+        if cached.stale:
+            return cached
+        return _as_history(
+            cached.frame,
+            cached.ticker,
+            cached.source,
+            fetched_at=cached.fetched_at,
+            from_cache=True,
+            stale=True,
+        )
     fetched_at = pd.Timestamp(datetime.now(UTC))
     _write_cache(ticker, frame, fetched_at, directory)
     return _as_history(frame, ticker, YAHOO_SOURCE, fetched_at=fetched_at, from_cache=False)
@@ -380,12 +398,20 @@ def search_symbols(query: str, limit: int = 8) -> list[SymbolHit]:
         raise MarketDataError("Type at least two letters to search.")
 
     try:
-        import yfinance as yf
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            result = yf.Search(text, max_results=max(limit * 3, 10))
+        def _search():
+            import yfinance as yf
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return yf.Search(text, max_results=max(limit * 3, 10))
+
+        result = _run_with_timeout(_search, SEARCH_TIMEOUT_SECONDS)
         quotes = list(getattr(result, "quotes", None) or [])
+    except FuturesTimeout as exc:
+        raise MarketDataError(
+            "Symbol search timed out. Enter a ticker directly."
+        ) from exc
     except MarketDataError:
         raise
     except Exception as exc:
@@ -439,11 +465,19 @@ def fetch_company_snapshot(symbol: str, *, offline: bool = False) -> CompanySnap
         )
 
     try:
-        import yfinance as yf
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            info = yf.Ticker(ticker).info or {}
+        def _info():
+            import yfinance as yf
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return yf.Ticker(ticker).info or {}
+
+        info = _run_with_timeout(_info, SNAPSHOT_TIMEOUT_SECONDS)
+    except FuturesTimeout as exc:
+        raise MarketDataError(
+            f"Company facts for {ticker} timed out after {SNAPSHOT_TIMEOUT_SECONDS}s."
+        ) from exc
     except Exception as exc:
         raise MarketDataError(
             f"Company facts for {ticker} are unavailable right now. {exc}"
@@ -532,18 +566,29 @@ def _download_yahoo(ticker: str) -> pd.DataFrame:
 def _download_yahoo_once(ticker: str) -> pd.DataFrame:
     """One Yahoo attempt. Empty responses become MarketDataError."""
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-    try:
+
+    def _call() -> pd.DataFrame:
         import yfinance as yf
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            raw = yf.download(
+            return yf.download(
                 ticker,
                 period="max",
                 auto_adjust=True,
                 progress=False,
                 threads=False,
             )
+
+    try:
+        raw = _run_with_timeout(_call, DOWNLOAD_TIMEOUT_SECONDS)
+    except FuturesTimeout as exc:
+        raise MarketDataError(
+            f"Yahoo Finance timed out after {DOWNLOAD_TIMEOUT_SECONDS}s for {ticker}. "
+            "Try again, or switch to the offline demo."
+        ) from exc
+    except MarketDataError:
+        raise
     except Exception as exc:
         raise MarketDataError(
             f"Yahoo Finance did not return data for {ticker}. {exc}"
@@ -557,6 +602,13 @@ def _download_yahoo_once(ticker: str) -> pd.DataFrame:
             "Check the symbol, or switch to the offline demo."
         )
     return frame
+
+
+def _run_with_timeout(func, timeout_seconds: float):
+    """Run ``func`` in a worker thread; raise FuturesTimeout on deadline."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(func)
+        return future.result(timeout=timeout_seconds)
 
 
 def _normalize_yahoo(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -737,7 +789,11 @@ def _ticker_label(explicit: str | None, inferred: str | None) -> str:
 
 
 def _validate(df: pd.DataFrame) -> pd.DataFrame:
-    """Raise on a broken frame. Fill an isolated gap rather than drop the day."""
+    """
+    Raise on a broken frame. Rows with any NaN in the price columns are
+    dropped (no silent forward/back fill). Cross-symbol joins already use
+    an inner calendar; inventing prices inside one series would hide gaps.
+    """
     if df.empty:
         raise MarketDataError("Loaded an empty price frame.")
     if not df.index.is_monotonic_increasing:
@@ -745,11 +801,15 @@ def _validate(df: pd.DataFrame) -> pd.DataFrame:
     if df.index.has_duplicates:
         raise MarketDataError("Duplicate dates in the price file.")
 
-    n_missing = int(df[_PRICE_COLUMNS].isna().sum().sum())
-    if n_missing:
-        df[_PRICE_COLUMNS] = df[_PRICE_COLUMNS].ffill().bfill()
+    before = len(df)
+    df = df.dropna(subset=_PRICE_COLUMNS).copy()
+    dropped = before - len(df)
+    if dropped:
+        df.attrs["dropped_gap_rows"] = int(dropped)
+    if df.empty:
+        raise MarketDataError("Unrecoverable gaps: every row was missing a price field.")
     if df[_PRICE_COLUMNS].isna().any().any():
-        raise MarketDataError("Unrecoverable gaps remain after filling.")
+        raise MarketDataError("Unrecoverable gaps remain in the price columns.")
     if (df["volume"] < 0).any():
         raise MarketDataError("Volume contains negative values.")
     if (df["adj_close"] <= 0).any() or (df["close"] <= 0).any():
