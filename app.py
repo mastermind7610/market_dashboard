@@ -123,6 +123,12 @@ PAGE_CSS = """
         border-radius: 12px;
         padding: 0.75rem 0.9rem 0.55rem 0.9rem;
         box-shadow: 0 1px 2px rgba(28, 36, 48, 0.04);
+        overflow: visible;
+    }
+    div[data-testid="stMetricLabel"],
+    div[data-testid="stTooltipHoverTarget"],
+    div[data-testid="stMetricLabel"] > div {
+        overflow: visible !important;
     }
     div[data-testid="stMetricValue"] {font-variant-numeric: tabular-nums;}
     .kicker {
@@ -199,12 +205,14 @@ PAGE_CSS = """
     .year-table th, .year-table td {padding: 0.35rem 0.55rem; border-bottom: 1px solid #eef1f5; text-align: right;}
     .year-table th:first-child, .year-table td:first-child {text-align: left;}
     div[data-testid="stTabs"] {margin-top: 0.4rem;}
-    .section-nav {
+    /* Section nav is a Streamlit segmented control; do not wrap it in a
+       separate markdown <div> (that left an empty bar under the date range). */
+    div[data-testid="stButtonGroup"] {
         background: #f8fafc;
         border: 1px solid #e4e8ee;
         border-radius: 12px;
-        padding: 0.55rem 0.75rem 0.35rem 0.75rem;
-        margin: 0.35rem 0 0.85rem 0;
+        padding: 0.35rem 0.45rem;
+        margin: 0.15rem 0 0.65rem 0;
     }
     .callout {
         background: #fff8eb;
@@ -247,7 +255,6 @@ PAGE_CSS = """
         h1 {font-size: 1.35rem;}
         .kicker {font-size: 0.7rem; letter-spacing: 0.1em;}
         div[data-testid="stHorizontalBlock"] {gap: 0.45rem;}
-        .section-nav {padding: 0.4rem 0.5rem 0.25rem 0.5rem;}
         .callout, .error-card {font-size: 0.86rem; padding: 0.6rem 0.75rem;}
     }
 </style>
@@ -820,32 +827,34 @@ def _metrics(stats) -> None:
     bottom[1].metric("Sortino ratio", _number(stats.sortino, "{:.2f}"), help=help_text["sortino"])
     bottom[2].metric(f"Beta vs {bench}", _number(stats.beta, "{:.2f}"), help=help_text["beta"])
     bottom[3].metric(f"Correlation vs {bench}", _number(stats.correlation, "{:.2f}"), help=help_text["correlation"])
-    bottom[4].metric("95% hist. VaR", _number(stats.value_at_risk_95, "{:.1%}"), help=help_text.get("value_at_risk_95", ""))
+    bottom[4].metric("95% hist. VaR", _number(stats.value_at_risk_95, "{:.1%}"), help=help_text["value_at_risk_95"])
     extra = st.columns(5)
+    # Required keys (not .get(..., "")) so Streamlit always gets a real help
+    # string and draws the tooltip icon — empty help hides the icon.
     extra[0].metric(
         "95% param. VaR",
         _number(stats.parametric_var_95, "{:.1%}"),
-        help=help_text.get("parametric_var_95", ""),
+        help=help_text["parametric_var_95"],
     )
     extra[1].metric(
         "95% CVaR / ES",
         _number(stats.cvar_95, "{:.1%}"),
-        help=help_text.get("cvar_95", ""),
+        help=help_text["cvar_95"],
     )
     extra[2].metric(
         f"Alpha vs {bench}",
         _number(stats.alpha, "{:+.1%}"),
-        help=help_text.get("alpha", ""),
+        help=help_text["alpha"],
     )
     extra[3].metric(
         "Peak→trough (days)",
         "—" if stats.drawdown_days_to_trough is None else str(stats.drawdown_days_to_trough),
-        help=help_text.get("drawdown_days_to_trough", ""),
+        help=help_text["drawdown_days_to_trough"],
     )
     extra[4].metric(
         "Trough→recovery",
         "—" if stats.drawdown_days_to_recovery is None else str(stats.drawdown_days_to_recovery),
-        help=help_text.get("drawdown_days_to_recovery", ""),
+        help=help_text["drawdown_days_to_recovery"],
     )
     st.caption(
         f"Volatility label: **{label}**. {volatility_rule_text()} "
@@ -935,8 +944,9 @@ def _cost_and_diversification(briefing) -> None:
     cost = briefing.cost_report
     divers = briefing.comparison.diversification
     figures = briefing.figures
-    has_charts = figures.get("allocation") is not None or figures.get("risk_contribution") is not None
-    if cost is None and divers is None and not has_charts:
+    allocation = figures.get("allocation")
+    risk_bars = figures.get("risk_contribution")
+    if cost is None and divers is None and allocation is None and risk_bars is None:
         return
     st.subheader("Portfolio construction details")
     if cost is not None:
@@ -947,7 +957,7 @@ def _cost_and_diversification(briefing) -> None:
         cols[3].metric("Resets (incl. open)", str(cost.rebalance_count))
         st.caption(
             "Turnover is half the L1 weight distance at each reset; inception counts as 1.0. "
-            "Fee drag is the sum of turnover × bps on traded notional."
+            "Fee drag is the sum of turnover x bps on traded notional."
         )
     if divers is not None:
         dcols = st.columns(3)
@@ -958,19 +968,20 @@ def _cost_and_diversification(briefing) -> None:
         listing = ", ".join(f"{name} {share:.0%}" for name, share in ranked)
         dcols[2].metric("Top risk contribution", ranked[0][0] if ranked else "—")
         st.caption(f"Risk contribution by weight: {listing}.")
-    if has_charts:
-        left, right = st.columns(2)
-        with left:
-            _show(figures.get("allocation"), "Allocation chart needs portfolio weights.")
-            st.caption("Target weights after renormalization. Zero-weight symbols are left out.")
-        with right:
-            _show(figures.get("risk_contribution"), "Risk contribution needs a diversified mix.")
-            st.caption("Each bar is that holding's share of portfolio variance.")
+    # Full-width stacked charts (not nested columns) so Plotly gets a real
+    # width on first paint — side-by-side columns were blank on Streamlit Cloud.
+    if allocation is not None:
+        st.markdown("**Target weights**")
+        _show(allocation, "Allocation chart needs portfolio weights.")
+        st.caption("Target weights after renormalization. Zero-weight symbols are left out.")
+    if risk_bars is not None:
+        st.markdown("**Risk contribution**")
+        _show(risk_bars, "Risk contribution needs a diversified mix.")
+        st.caption("Each bar is that holding's share of portfolio variance.")
 
 
 def _section_nav() -> str:
     """Compact jump control for the main briefing sections."""
-    st.markdown('<div class="section-nav">', unsafe_allow_html=True)
     chosen = st.segmented_control(
         "On this page",
         SECTIONS,
@@ -980,7 +991,6 @@ def _section_nav() -> str:
         bind=BOUND,
         help="Jump to a block of the briefing. All sections keeps the full page visible.",
     )
-    st.markdown("</div>", unsafe_allow_html=True)
     return chosen or SECTION_ALL
 
 

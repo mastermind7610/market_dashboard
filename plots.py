@@ -504,7 +504,7 @@ def rolling_risk_adjusted_chart(
 
 
 def allocation_chart(weights: dict[str, float] | None) -> go.Figure | None:
-    """Horizontal bar of portfolio target weights (percent of capital)."""
+    """Bar chart of portfolio target weights (percent of capital)."""
     if not weights:
         return None
     cleaned = {str(name): float(value) for name, value in weights.items() if float(value) > 0}
@@ -516,26 +516,31 @@ def allocation_chart(weights: dict[str, float] | None) -> go.Figure | None:
     figure = _figure("Portfolio allocation")
     figure.add_trace(
         go.Bar(
-            y=names,
-            x=values,
-            orientation="h",
+            x=names,
+            y=values,
             marker_color=colors,
-            hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
+            hovertemplate="%{x}: %{y:.1f}%<extra></extra>",
             text=[f"{value:.1f}%" for value in values],
-            textposition="auto",
+            textposition="outside",
+            cliponaxis=False,
         )
     )
+    # Bar charts must not keep the line-chart "x unified" hover mode from _style:
+    # that mode blanks categorical bars in some Streamlit/Plotly front ends.
     figure.update_layout(
-        xaxis_title="Weight (%)",
-        yaxis_title=None,
-        height=max(260, 80 + 36 * len(names)),
-        xaxis=dict(range=[0, max(100.0, max(values) * 1.1)]),
+        hovermode="closest",
+        xaxis_title=None,
+        yaxis_title="Weight (%)",
+        height=max(320, 160 + 40 * len(names)),
+        yaxis=dict(range=[0, max(100.0, max(values) * 1.25)]),
+        margin=dict(l=56, r=24, t=96, b=56),
+        showlegend=False,
     )
     return figure
 
 
 def risk_contribution_chart(risk_contribution: dict[str, float] | None) -> go.Figure | None:
-    """Horizontal bar of each holding's share of portfolio variance."""
+    """Bar chart of each holding's share of portfolio variance."""
     if not risk_contribution:
         return None
     ranked = sorted(
@@ -551,20 +556,23 @@ def risk_contribution_chart(risk_contribution: dict[str, float] | None) -> go.Fi
     figure = _figure("Risk contribution")
     figure.add_trace(
         go.Bar(
-            y=names,
-            x=values,
-            orientation="h",
+            x=names,
+            y=values,
             marker_color=colors,
-            hovertemplate="%{y}: %{x:.1f}% of variance<extra></extra>",
+            hovertemplate="%{x}: %{y:.1f}% of variance<extra></extra>",
             text=[f"{value:.1f}%" for value in values],
-            textposition="auto",
+            textposition="outside",
+            cliponaxis=False,
         )
     )
     figure.update_layout(
-        xaxis_title="Share of portfolio variance (%)",
-        yaxis_title=None,
-        height=max(260, 80 + 36 * len(names)),
-        xaxis=dict(range=[0, max(100.0, max(values) * 1.1)]),
+        hovermode="closest",
+        xaxis_title=None,
+        yaxis_title="Share of portfolio variance (%)",
+        height=max(320, 160 + 40 * len(names)),
+        yaxis=dict(range=[0, max(100.0, max(values) * 1.25)]),
+        margin=dict(l=56, r=24, t=96, b=56),
+        showlegend=False,
     )
     return figure
 
