@@ -1,12 +1,13 @@
 """
 features.py — THE FEATURE LAYER
 =================================
-Takes the clean OHLCV frame from data_loader and adds the three
-signals our dashboard actually plots:
+Takes the clean OHLCV frame from data_loader and adds the signals
+our dashboard actually plots:
 
     log_return    -> daily log return of close
     volatility    -> rolling annualized std of log returns
     momentum      -> trailing N-day cumulative log return
+    drawdown      -> peak-to-trough loss of a wealth index
 
 Each is one small function. build_features() wires them together so
 the rest of the system imports one thing and gets a fully enriched
@@ -82,6 +83,32 @@ def add_momentum(df: pd.DataFrame, window: int = 63) -> pd.DataFrame:
     return out
 
 
+def add_drawdown(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Running drawdown from the peak of a wealth index.
+
+    Volatility answers "how noisy were returns?". Drawdown answers the
+    investor's real question: "how far below the high-water mark am I?"
+    A -0.15 means wealth is 15% below its peak so far.
+
+    Construction (causal — only past data):
+      1. Turn log returns into a wealth index (start at 1.0).
+      2. Track the running maximum of that wealth (the peak).
+      3. drawdown_t = wealth_t / peak_t - 1  →  0 at peaks, negative in dips.
+    """
+    out = df.copy()
+    if "log_return" not in out.columns:
+        out = add_log_returns(out)
+
+    # Day-0 log_return is NaN (no prior close). Treat it as flat so the
+    # wealth index starts at 1.0 instead of becoming NaN for the whole series.
+    log_ret = out["log_return"].fillna(0.0)
+    wealth = np.exp(log_ret.cumsum())
+    running_peak = wealth.cummax()
+    out["drawdown"] = wealth / running_peak - 1.0
+    return out
+
+
 def build_features(
     df: pd.DataFrame,
     vol_window: int = 21,
@@ -90,12 +117,14 @@ def build_features(
     """
     Apply the full feature pipeline.
 
-    Order matters: returns first, because volatility and momentum both
-    depend on them. This is the contract the plot layer will consume.
+    Order matters: returns first, because volatility, momentum, and
+    drawdown all depend on them. This is the contract the plot layer
+    will consume.
     """
     out = add_log_returns(df)
     out = add_volatility(out, window=vol_window)
     out = add_momentum(out, window=mom_window)
+    out = add_drawdown(out)
 
     # Tag the windows in attrs so the plot layer can label axes
     # without having to be told the parameter values separately.
@@ -118,4 +147,6 @@ if __name__ == "__main__":
     print(f"\nFeature summary:")
     print(feats[["log_return",
                  f"volatility_{feats.attrs['vol_window']}d",
-                 f"momentum_{feats.attrs['mom_window']}d"]].describe().round(4))
+                 f"momentum_{feats.attrs['mom_window']}d",
+                 "drawdown"]].describe().round(4))
+    print(f"\nMax drawdown: {feats['drawdown'].min():.4f}")
